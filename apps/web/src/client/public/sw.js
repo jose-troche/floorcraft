@@ -25,7 +25,11 @@ self.addEventListener("fetch", (event) => {
     caches.match(req).then((cached) => {
       const network = fetch(req)
         .then((res) => {
-          if (res.ok) caches.open(CACHE_NAME).then((cache) => cache.put(req, res.clone()));
+          // Clone synchronously, before any await gap — by the time caches.open()
+          // resolves, the caller may already be reading this response's body, and
+          // clone() throws once a body is disturbed.
+          const copy = res.ok ? res.clone() : null;
+          if (copy) caches.open(CACHE_NAME).then((cache) => cache.put(req, copy)).catch(() => {});
           return res;
         })
         .catch(() => cached);
