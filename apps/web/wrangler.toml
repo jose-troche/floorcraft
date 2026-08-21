@@ -39,9 +39,10 @@ TIER1_ENABLED = "true"
 DAILY_QUOTA_PER_CLIENT = "12"
 GLOBAL_NEURON_BUDGET = "7000"
 TIER1_MODEL = "@cf/meta/llama-3.1-8b-instruct"
-# TURNSTILE_SITE_KEY is public (sent to the client via /api/config) so it's fine
-# as a plain var — set it here once you've created a Turnstile widget:
-# TURNSTILE_SITE_KEY = "0x4AAAAAAA..."
+# Public site key for the "floorcraft-infer" Turnstile widget (invisible mode,
+# scoped to floorcraft.troche.workers.dev) — safe to commit, it's sent to the
+# client via /api/config. The paired secret key is set via `wrangler secret put`.
+TURNSTILE_SITE_KEY = "0x4AAAAAAEXz3JirqgihZG8P"
 
 # Secrets (never commit these) — set with `wrangler secret put <NAME>`:
 #   TURNSTILE_SECRET_KEY   Turnstile secret key, paired with TURNSTILE_SITE_KEY
