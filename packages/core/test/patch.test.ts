@@ -82,6 +82,17 @@ describe("applyPatch", () => {
     expect(result.violations?.[0]?.reason).toBe("boundary-too-small");
   });
 
+  it("auto-generated roomIds don't collide after removing a room out of order", () => {
+    const doc = basePlan();
+    let { doc: d } = apply(doc, [{ op: "addRoom", program: "kitchen", areaWeight: 1 }]); // room-0
+    ({ doc: d } = apply(d, [{ op: "addRoom", program: "office", areaWeight: 1 }])); // room-1
+    ({ doc: d } = apply(d, [{ op: "addRoom", program: "living", areaWeight: 1 }])); // room-2
+    ({ doc: d } = apply(d, [{ op: "addRoom", program: "dining", areaWeight: 1 }])); // room-3
+    ({ doc: d } = apply(d, [{ op: "removeRoom", roomId: "room-1" }])); // count drops to 3, but room-3 still exists
+    const result = apply(d, [{ op: "addRoom", program: "bath", areaWeight: 1 }]);
+    expect(Object.keys(activeLevel(result.doc).graph.rooms).sort()).toEqual(["room-0", "room-2", "room-3", "room-4"]);
+  });
+
   it("reports a per-room percentage change for resizeRoom", () => {
     const doc = basePlan();
     let { doc: d } = apply(doc, [{ op: "addRoom", roomId: "kitchen", program: "kitchen", areaWeight: 1 }]);

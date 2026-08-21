@@ -59,6 +59,20 @@ type LevelState = {
   roomSeq: number;
 };
 
+/**
+ * The next auto-generated room id must exceed every id currently in use, not just
+ * count how many rooms remain — removing a room out of order (e.g. room-1 out of
+ * room-0..room-3) otherwise lets a fresh count-based id collide with a survivor.
+ */
+function nextRoomSeq(existingIds: Iterable<RoomId>): number {
+  let max = -1;
+  for (const id of existingIds) {
+    const match = /^room-(\d+)$/.exec(id);
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return max + 1;
+}
+
 function levelStateFromDoc(doc: PlanDocument, level: Level): LevelState {
   const roomMeta: Record<RoomId, RoomMeta> = {};
   for (const [roomId, room] of Object.entries(level.graph.rooms)) {
@@ -69,7 +83,7 @@ function levelStateFromDoc(doc: PlanDocument, level: Level): LevelState {
     roomMeta,
     boundary: level.boundary,
     units: doc.units,
-    roomSeq: Object.keys(level.graph.rooms).length,
+    roomSeq: nextRoomSeq(Object.keys(level.graph.rooms)),
   };
 }
 

@@ -47,6 +47,7 @@ export class ProviderManager {
 
   async refreshAvailability(): Promise<void> {
     this.tier0Availability = await this.tier0.availability();
+    if (this.tier0Availability === "available") this.tier0.warmup();
     this.tier1Availability = this.tier1 ? await this.tier1.availability() : "unavailable";
     this.emit();
   }

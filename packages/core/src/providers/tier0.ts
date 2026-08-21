@@ -32,6 +32,18 @@ export class Tier0Provider implements PlanProvider {
   // message — creating a session is the expensive part, not prompting an existing one.
   private baseSessionPromise: Promise<LanguageModelSession> | null = null;
 
+  /**
+   * Fires off session creation without waiting on it, so the model is already warm by
+   * the time the user sends a first message instead of paying the cold-start cost then.
+   * Safe to call speculatively (e.g. right after availability() reports "available");
+   * failures are swallowed here since propose() will surface them on the next real call.
+   */
+  warmup(): void {
+    const lm = getLanguageModel();
+    if (!lm) return;
+    void this.getBaseSession(lm, buildSystemPrompt(CORE_PATCH_OPS)).catch(() => {});
+  }
+
   async availability(): Promise<Availability> {
     const lm = getLanguageModel();
     if (!lm) return "unavailable";
