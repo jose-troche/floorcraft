@@ -53,11 +53,57 @@ header.app-header h1 {
 }
 
 .tier-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   font-size: 0.75rem;
   padding: 0.15rem 0.5rem;
   border-radius: 1rem;
   border: 1px solid var(--border);
   background: var(--panel-bg);
+}
+.tier-badge.busy {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.spinner {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  display: inline-block;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.chat-msg.pending {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-style: italic;
+  color: var(--muted);
+}
+.typing-dots {
+  display: inline-flex;
+  gap: 0.2rem;
+  flex-shrink: 0;
+}
+.typing-dots span {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: currentColor;
+  animation: typing-bounce 1.1s infinite ease-in-out;
+}
+.typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typing-bounce {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-0.15rem); }
 }
 
 .spacer {

@@ -22,6 +22,7 @@ export class AppUI {
   private tab: Tab = "chat";
   private error: string | null = null;
   private chatBusy = false;
+  private pendingLabel: string | null = null;
 
   constructor(
     private root: HTMLElement,
@@ -59,12 +60,21 @@ export class AppUI {
 
     const badge = document.createElement("span");
     badge.className = "tier-badge";
-    badge.textContent =
+    const tierText =
       providerState.activeId === "tier0-on-device"
         ? "Tier 0 · on-device"
         : providerState.activeId === "tier1-hosted"
           ? "Tier 1 · hosted"
           : "Manual editing only";
+    if (this.chatBusy) {
+      badge.classList.add("busy");
+      const spinner = document.createElement("span");
+      spinner.className = "spinner";
+      badge.appendChild(spinner);
+      badge.appendChild(document.createTextNode(`${tierText} — working…`));
+    } else {
+      badge.textContent = tierText;
+    }
     header.appendChild(badge);
 
     const tierSelect = document.createElement("select");
@@ -165,7 +175,22 @@ export class AppUI {
       msg.textContent = turn.text;
       messages.appendChild(msg);
     }
+    if (this.chatBusy) {
+      const pending = document.createElement("div");
+      pending.className = "chat-msg assistant pending";
+      const dots = document.createElement("span");
+      dots.className = "typing-dots";
+      dots.innerHTML = "<span></span><span></span><span></span>";
+      pending.appendChild(dots);
+      const label = document.createElement("span");
+      label.textContent = this.pendingLabel ?? "Working…";
+      pending.appendChild(label);
+      messages.appendChild(pending);
+    }
     wrap.appendChild(messages);
+    queueMicrotask(() => {
+      messages.scrollTop = messages.scrollHeight;
+    });
 
     const chatDisabled = providerState.activeId === null;
 
@@ -188,14 +213,25 @@ export class AppUI {
     send.textContent = this.chatBusy ? "…" : "Send";
     send.disabled = chatDisabled || this.chatBusy;
 
+    const tierLabel =
+      providerState.activeId === "tier0-on-device"
+        ? "Tier 0 (on-device)"
+        : providerState.activeId === "tier1-hosted"
+          ? "Tier 1 (hosted)"
+          : null;
+
     const submit = async () => {
       const text = input.value.trim();
       if (!text || this.chatBusy) return;
       this.error = null;
       this.chatBusy = true;
+      this.pendingLabel = tierLabel
+        ? `Trying a direct command first, then asking ${tierLabel} if needed — this can take several seconds…`
+        : "Working…";
       this.render();
       const result = await this.store.submitChatTurn(text);
       this.chatBusy = false;
+      this.pendingLabel = null;
       if (result.kind === "error") this.error = result.message;
       this.render();
     };
