@@ -1,0 +1,480 @@
+// Renders the whole app from current store/provider state. No framework — the
+// document is small (<=40 rooms per level, MCP-3) so a full re-render per change
+// is simple and keeps the bundle under the NFR-2 budget.
+
+import {
+  PROGRAM_COLORS,
+  ROOM_PROGRAM_MIN_DIMENSIONS,
+  activeLevel,
+  exportJson,
+  formatLength,
+  renderSvg,
+  type PatchOp,
+  type RoomProgram,
+  type Units,
+} from "@floorcraft/core";
+import type { PlanStore } from "./store";
+import type { ProviderManager } from "./providers";
+
+type Tab = "chat" | "manual";
+
+export class AppUI {
+  private tab: Tab = "chat";
+  private error: string | null = null;
+  private chatBusy = false;
+
+  constructor(
+    private root: HTMLElement,
+    private store: PlanStore,
+    private providers: ProviderManager,
+  ) {
+    this.store.subscribe(() => this.render());
+    this.providers.subscribe(() => this.render());
+  }
+
+  render(): void {
+    const doc = this.store.doc;
+    const level = activeLevel(doc);
+    const providerState = this.providers.getState();
+
+    this.root.innerHTML = "";
+    this.root.appendChild(this.renderHeader(providerState));
+
+    const main = document.createElement("main");
+    main.className = "layout";
+    main.appendChild(this.renderLeftPanel(providerState));
+    main.appendChild(this.renderRightPanel(level, doc.units));
+    this.root.appendChild(main);
+  }
+
+  // ---------------------------------------------------------------- header
+
+  private renderHeader(providerState: ReturnType<ProviderManager["getState"]>): HTMLElement {
+    const header = document.createElement("header");
+    header.className = "app-header";
+
+    const h1 = document.createElement("h1");
+    h1.textContent = "Floorcraft";
+    header.appendChild(h1);
+
+    const badge = document.createElement("span");
+    badge.className = "tier-badge";
+    badge.textContent =
+      providerState.activeId === "tier0-on-device"
+        ? "Tier 0 · on-device"
+        : providerState.activeId === "tier1-hosted"
+          ? "Tier 1 · hosted"
+          : "Manual editing only";
+    header.appendChild(badge);
+
+    const tierSelect = document.createElement("select");
+    tierSelect.setAttribute("aria-label", "Inference tier");
+    const options: Array<[string, string]> = [
+      ["auto", "Auto"],
+      ["tier0-on-device", "Tier 0 (on-device)"],
+      ["tier1-hosted", "Tier 1 (hosted)"],
+      ["none", "None (manual only)"],
+    ];
+    for (const [value, label] of options) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      tierSelect.appendChild(opt);
+    }
+    tierSelect.value = providerState.activeId ?? "none";
+    tierSelect.onchange = () => {
+      if (tierSelect.value === "auto") this.providers.autoSelect();
+      else if (tierSelect.value === "none") this.providers.setActive(null);
+      else this.providers.setActive(tierSelect.value as "tier0-on-device" | "tier1-hosted");
+      this.store.setProvider(this.providers.getActiveProvider());
+    };
+    header.appendChild(tierSelect);
+
+    header.appendChild(this.spacer());
+
+    const undoBtn = document.createElement("button");
+    undoBtn.textContent = "Undo";
+    undoBtn.disabled = !this.store.canUndo;
+    undoBtn.onclick = () => this.store.undoManual();
+    header.appendChild(undoBtn);
+
+    const redoBtn = document.createElement("button");
+    redoBtn.textContent = "Redo";
+    redoBtn.disabled = !this.store.canRedo;
+    redoBtn.onclick = () => this.store.redoManual();
+    header.appendChild(redoBtn);
+
+    return header;
+  }
+
+  private spacer(): HTMLElement {
+    const s = document.createElement("div");
+    s.className = "spacer";
+    return s;
+  }
+
+  // ------------------------------------------------------------ left panel
+
+  private renderLeftPanel(providerState: ReturnType<ProviderManager["getState"]>): HTMLElement {
+    const panel = document.createElement("div");
+    panel.className = "left-panel";
+
+    const tabs = document.createElement("div");
+    tabs.className = "tabs";
+    for (const [id, label] of [
+      ["chat", "Chat"],
+      ["manual", "Manual editor"],
+    ] as const) {
+      const btn = document.createElement("button");
+      btn.textContent = label;
+      btn.setAttribute("aria-selected", String(this.tab === id));
+      btn.onclick = () => {
+        this.tab = id;
+        this.render();
+      };
+      tabs.appendChild(btn);
+    }
+    panel.appendChild(tabs);
+
+    const tabPanel = document.createElement("div");
+    tabPanel.className = "tab-panel";
+    if (this.error) {
+      const banner = document.createElement("div");
+      banner.className = "error-banner";
+      banner.textContent = this.error;
+      tabPanel.appendChild(banner);
+    }
+    tabPanel.appendChild(this.tab === "chat" ? this.renderChatTab(providerState) : this.renderManualTab());
+    panel.appendChild(tabPanel);
+
+    return panel;
+  }
+
+  private renderChatTab(providerState: ReturnType<ProviderManager["getState"]>): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.style.display = "flex";
+    wrap.style.flexDirection = "column";
+    wrap.style.flex = "1";
+    wrap.style.minHeight = "0";
+
+    const messages = document.createElement("div");
+    messages.className = "chat-messages";
+    for (const turn of this.store.chatHistory) {
+      const msg = document.createElement("div");
+      msg.className = `chat-msg ${turn.role}`;
+      msg.textContent = turn.text;
+      messages.appendChild(msg);
+    }
+    wrap.appendChild(messages);
+
+    const chatDisabled = providerState.activeId === null;
+
+    if (chatDisabled) {
+      const note = document.createElement("div");
+      note.className = "chat-disabled-note";
+      note.textContent =
+        "No inference tier is available, so chat is disabled (per RTE-4). Use the Manual editor tab — every edit chat could make is also a button there.";
+      wrap.appendChild(note);
+    }
+
+    const row = document.createElement("div");
+    row.className = "chat-input-row";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = chatDisabled ? "Chat disabled — use the manual editor" : "Describe your plan, or say things like \"swap the kitchen and bath\"";
+    input.disabled = chatDisabled || this.chatBusy;
+    const send = document.createElement("button");
+    send.className = "primary";
+    send.textContent = this.chatBusy ? "…" : "Send";
+    send.disabled = chatDisabled || this.chatBusy;
+
+    const submit = async () => {
+      const text = input.value.trim();
+      if (!text || this.chatBusy) return;
+      this.error = null;
+      this.chatBusy = true;
+      this.render();
+      const result = await this.store.submitChatTurn(text);
+      this.chatBusy = false;
+      if (result.kind === "error") this.error = result.message;
+      this.render();
+    };
+
+    input.onkeydown = (e) => {
+      if (e.key === "Enter") void submit();
+    };
+    send.onclick = () => void submit();
+
+    row.appendChild(input);
+    row.appendChild(send);
+    wrap.appendChild(row);
+
+    return wrap;
+  }
+
+  // --------------------------------------------------------- manual editor
+
+  private renderManualTab(): HTMLElement {
+    const wrap = document.createElement("div");
+    const doc = this.store.doc;
+    const level = activeLevel(doc);
+
+    wrap.appendChild(this.renderBoundaryForm(doc.units, level.boundary));
+    wrap.appendChild(this.renderUnitsToggle(doc.units));
+    wrap.appendChild(this.renderAddRoomForm());
+    wrap.appendChild(this.renderRoomList());
+
+    return wrap;
+  }
+
+  private async runManual(ops: PatchOp[]): Promise<void> {
+    this.error = null;
+    const result = await this.store.applyManual(ops);
+    if (result.kind === "error") this.error = result.message;
+    this.render();
+  }
+
+  private renderBoundaryForm(units: Units, boundary: { widthMm: number; depthMm: number }): HTMLElement {
+    const fs = document.createElement("fieldset");
+    const legend = document.createElement("legend");
+    legend.textContent = "Boundary";
+    fs.appendChild(legend);
+
+    const widthLabel = document.createElement("label");
+    widthLabel.textContent = `Width (${formatLength(boundary.widthMm, units)})`;
+    const widthInput = document.createElement("input");
+    widthInput.type = "number";
+    widthInput.value = String(boundary.widthMm);
+    widthLabel.appendChild(widthInput);
+    fs.appendChild(widthLabel);
+
+    const depthLabel = document.createElement("label");
+    depthLabel.textContent = `Depth (${formatLength(boundary.depthMm, units)})`;
+    const depthInput = document.createElement("input");
+    depthInput.type = "number";
+    depthInput.value = String(boundary.depthMm);
+    depthLabel.appendChild(depthInput);
+    fs.appendChild(depthLabel);
+
+    const btn = document.createElement("button");
+    btn.textContent = "Apply boundary";
+    btn.onclick = () =>
+      void this.runManual([{ op: "setBoundary", widthMm: Number(widthInput.value), depthMm: Number(depthInput.value) }]);
+    fs.appendChild(btn);
+
+    return fs;
+  }
+
+  private renderUnitsToggle(units: Units): HTMLElement {
+    const fs = document.createElement("fieldset");
+    const legend = document.createElement("legend");
+    legend.textContent = "Units";
+    fs.appendChild(legend);
+    const btn = document.createElement("button");
+    btn.textContent = units === "imperial" ? "Switch to metric" : "Switch to imperial";
+    btn.onclick = () => void this.runManual([{ op: "setUnits", units: units === "imperial" ? "metric" : "imperial" }]);
+    fs.appendChild(btn);
+    return fs;
+  }
+
+  private renderAddRoomForm(): HTMLElement {
+    const fs = document.createElement("fieldset");
+    const legend = document.createElement("legend");
+    legend.textContent = "Add room";
+    fs.appendChild(legend);
+
+    const programLabel = document.createElement("label");
+    programLabel.textContent = "Program";
+    const programSelect = document.createElement("select");
+    for (const program of Object.keys(ROOM_PROGRAM_MIN_DIMENSIONS) as RoomProgram[]) {
+      const opt = document.createElement("option");
+      opt.value = program;
+      opt.textContent = program;
+      programSelect.appendChild(opt);
+    }
+    programLabel.appendChild(programSelect);
+    fs.appendChild(programLabel);
+
+    const nameLabel = document.createElement("label");
+    nameLabel.textContent = "Name (optional)";
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameLabel.appendChild(nameInput);
+    fs.appendChild(nameLabel);
+
+    const rooms = Object.entries(activeLevel(this.store.doc).graph.rooms);
+    const adjacentLabel = document.createElement("label");
+    adjacentLabel.textContent = "Adjacent to (optional)";
+    const adjacentSelect = document.createElement("select");
+    const noneOpt = document.createElement("option");
+    noneOpt.value = "";
+    noneOpt.textContent = "(none)";
+    adjacentSelect.appendChild(noneOpt);
+    for (const [roomId, room] of rooms) {
+      const opt = document.createElement("option");
+      opt.value = roomId;
+      opt.textContent = room.name;
+      adjacentSelect.appendChild(opt);
+    }
+    adjacentLabel.appendChild(adjacentSelect);
+    fs.appendChild(adjacentLabel);
+
+    const btn = document.createElement("button");
+    btn.className = "primary";
+    btn.textContent = "Add room";
+    btn.onclick = () =>
+      void this.runManual([
+        {
+          op: "addRoom",
+          program: programSelect.value as RoomProgram,
+          name: nameInput.value.trim() || undefined,
+          areaWeight: 1,
+          adjacentTo: adjacentSelect.value || undefined,
+        },
+      ]);
+    fs.appendChild(btn);
+
+    return fs;
+  }
+
+  private renderRoomList(): HTMLElement {
+    const fs = document.createElement("fieldset");
+    const legend = document.createElement("legend");
+    legend.textContent = "Rooms";
+    fs.appendChild(legend);
+
+    const level = activeLevel(this.store.doc);
+    const rooms = Object.entries(level.graph.rooms);
+
+    if (rooms.length === 0) {
+      const p = document.createElement("p");
+      p.textContent = "No rooms yet — add one above.";
+      fs.appendChild(p);
+      return fs;
+    }
+
+    for (const [roomId, room] of rooms) {
+      const row = document.createElement("div");
+      row.className = "room-row";
+
+      const swatch = document.createElement("span");
+      swatch.className = "program-swatch";
+      swatch.style.background = PROGRAM_COLORS[room.program] ?? "#ccc";
+      row.appendChild(swatch);
+
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = room.name;
+      row.appendChild(name);
+
+      const renameBtn = document.createElement("button");
+      renameBtn.textContent = "Rename";
+      renameBtn.onclick = () => {
+        const newName = window.prompt("New name", room.name);
+        if (newName && newName.trim()) void this.runManual([{ op: "renameRoom", roomId, name: newName.trim() }]);
+      };
+      row.appendChild(renameBtn);
+
+      const smaller = document.createElement("button");
+      smaller.textContent = "−";
+      smaller.title = "20% smaller";
+      smaller.onclick = () => void this.resizeByPercent(roomId, -0.2);
+      row.appendChild(smaller);
+
+      const bigger = document.createElement("button");
+      bigger.textContent = "+";
+      bigger.title = "20% bigger";
+      bigger.onclick = () => void this.resizeByPercent(roomId, 0.2);
+      row.appendChild(bigger);
+
+      const otherRooms = rooms.filter(([id]) => id !== roomId);
+      if (otherRooms.length > 0) {
+        const swapSelect = document.createElement("select");
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "Swap with…";
+        swapSelect.appendChild(placeholder);
+        for (const [otherId, other] of otherRooms) {
+          const opt = document.createElement("option");
+          opt.value = otherId;
+          opt.textContent = other.name;
+          swapSelect.appendChild(opt);
+        }
+        swapSelect.onchange = () => {
+          if (swapSelect.value) void this.runManual([{ op: "swapRooms", roomIdA: roomId, roomIdB: swapSelect.value }]);
+        };
+        row.appendChild(swapSelect);
+      }
+
+      const deleteBtn = document.createElement("button");
+      deleteBtn.textContent = "Delete";
+      deleteBtn.onclick = () => void this.runManual([{ op: "removeRoom", roomId }]);
+      row.appendChild(deleteBtn);
+
+      fs.appendChild(row);
+    }
+
+    return fs;
+  }
+
+  private async resizeByPercent(roomId: string, delta: number): Promise<void> {
+    const level = activeLevel(this.store.doc);
+    const tree = level.generator?.tree;
+    const currentWeight = tree ? findWeight(tree, roomId) : null;
+    if (currentWeight === null) return;
+    await this.runManual([{ op: "resizeRoom", roomId, areaWeight: Math.max(currentWeight * (1 + delta), 0.01) }]);
+  }
+
+  // ----------------------------------------------------------- right panel
+
+  private renderRightPanel(level: ReturnType<typeof activeLevel>, units: Units): HTMLElement {
+    const panel = document.createElement("div");
+    panel.className = "right-panel";
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "canvas-toolbar";
+
+    const exportSvgBtn = document.createElement("button");
+    exportSvgBtn.textContent = "Export SVG";
+    exportSvgBtn.onclick = () => downloadBlob(renderSvg(this.store.doc), `${this.store.doc.title || "plan"}.svg`, "image/svg+xml");
+    toolbar.appendChild(exportSvgBtn);
+
+    const exportJsonBtn = document.createElement("button");
+    exportJsonBtn.textContent = "Export JSON";
+    exportJsonBtn.onclick = () => downloadBlob(exportJson(this.store.doc), `${this.store.doc.title || "plan"}.json`, "application/json");
+    toolbar.appendChild(exportJsonBtn);
+
+    const roomCount = document.createElement("span");
+    roomCount.style.marginLeft = "auto";
+    roomCount.style.fontSize = "0.8rem";
+    roomCount.style.color = "var(--muted)";
+    roomCount.textContent = `${Object.keys(level.graph.rooms).length} room(s) · ${formatLength(level.boundary.widthMm, units)} × ${formatLength(level.boundary.depthMm, units)}`;
+    toolbar.appendChild(roomCount);
+
+    panel.appendChild(toolbar);
+
+    const canvasContainer = document.createElement("div");
+    canvasContainer.className = "canvas-container";
+    canvasContainer.innerHTML = renderSvg(this.store.doc, { targetWidthPx: 900 });
+    panel.appendChild(canvasContainer);
+
+    return panel;
+  }
+}
+
+function findWeight(tree: import("@floorcraft/core").SlicingTree, roomId: string): number | null {
+  if (tree.kind === "leaf") return tree.roomId === roomId ? tree.areaWeight : null;
+  return findWeight(tree.children[0], roomId) ?? findWeight(tree.children[1], roomId);
+}
+
+function downloadBlob(content: string, filename: string, type: string): void {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

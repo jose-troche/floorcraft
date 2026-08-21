@@ -1,0 +1,44 @@
+name = "floorcraft"
+main = "src/worker/index.ts"
+compatibility_date = "2024-11-01"
+
+# Workers Static Assets — the SPA build (Vite output), served for anything that
+# isn't /api/* (specs.md §8.1: ASSETS is unbilled, unlimited on the free tier).
+[assets]
+directory = "./dist/client"
+binding = "ASSETS"
+
+# Workers AI — Tier 1's inference backend (10,000 neurons/day, account-wide).
+[ai]
+binding = "AI"
+
+# D1 — quota tracking only in Phase 1 (plans/plan_versions arrive in Phase 2).
+# Create with: `npx wrangler d1 create floorcraft`, then paste the returned
+# database_id below. Apply the schema with `npm run db:migrate:remote`.
+[[d1_databases]]
+binding = "DB"
+database_name = "floorcraft"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# Analytics Engine — neuron-cost logging (T1-5). Optional; omit this block if
+# your account doesn't have it enabled and the Worker will just skip logging.
+[[analytics_engine_datasets]]
+binding = "ANALYTICS"
+dataset = "floorcraft_infer"
+
+# Daily cron: prunes quota rows older than 7 days (CF-5).
+[triggers]
+crons = ["0 3 * * *"]
+
+[vars]
+TIER1_ENABLED = "true"
+DAILY_QUOTA_PER_CLIENT = "12"
+GLOBAL_NEURON_BUDGET = "7000"
+TIER1_MODEL = "@cf/meta/llama-3.1-8b-instruct"
+# TURNSTILE_SITE_KEY is public (sent to the client via /api/config) so it's fine
+# as a plain var — set it here once you've created a Turnstile widget:
+# TURNSTILE_SITE_KEY = "0x4AAAAAAA..."
+
+# Secrets (never commit these) — set with `wrangler secret put <NAME>`:
+#   TURNSTILE_SECRET_KEY   Turnstile secret key, paired with TURNSTILE_SITE_KEY
+#   QUOTA_SALT             random string used to salt the client/IP quota hash
