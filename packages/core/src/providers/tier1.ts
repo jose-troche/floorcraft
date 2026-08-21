@@ -46,7 +46,8 @@ export class Tier1Provider implements PlanProvider {
       throw new Error(body?.reason === "global_pool_exhausted" ? "Tier 1 global pool exhausted for today" : "Tier 1 quota exceeded");
     }
     if (!res.ok) {
-      throw new Error(`Tier 1 request failed: ${res.status}`);
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(body?.error ? `Tier 1 request failed: ${body.error}` : `Tier 1 request failed: ${res.status}`);
     }
     this.lastAvailability = "available";
 
