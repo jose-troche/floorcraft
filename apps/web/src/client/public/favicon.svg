@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>Floorcraft</title>
+  <rect width="64" height="64" rx="12" fill="#0072B2"/>
+  <g fill="#fff">
+    <rect x="10" y="10" width="44" height="6"/>
+    <rect x="10" y="48" width="44" height="6"/>
+    <rect x="10" y="10" width="6" height="44"/>
+    <rect x="48" y="10" width="6" height="44"/>
+    <rect x="29" y="10" width="6" height="44"/>
+    <rect x="35" y="29" width="19" height="6"/>
+  </g>
+</svg>
