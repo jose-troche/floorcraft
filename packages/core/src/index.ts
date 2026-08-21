@@ -13,3 +13,4 @@ export * from "./providers/schema.js";
 export * from "./providers/promptBuilder.js";
 export * from "./providers/tier0.js";
 export * from "./providers/tier1.js";
+export * from "./providers/safeJsonParse.js";

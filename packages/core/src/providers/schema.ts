@@ -2,7 +2,7 @@
 // specs.md INF-3 (providers return Patch, never prose-with-JSON) and INF-4 (the
 // client MUST validate every returned patch regardless of what the provider claims).
 
-import { ROOM_PROGRAM_MIN_DIMENSIONS, type Patch, type PatchOp, type RoomProgram } from "../types.js";
+import { DEFAULT_AREA_WEIGHT, ROOM_PROGRAM_MIN_DIMENSIONS, type Patch, type PatchOp, type RoomProgram } from "../types.js";
 
 export const CORE_PATCH_OPS = [
   "addRoom",
@@ -50,14 +50,18 @@ function validateOp(raw: unknown, allowed: ReadonlySet<string>): PatchOp | strin
       if (typeof o.program !== "string" || !ROOM_PROGRAMS.includes(o.program as RoomProgram)) {
         return `addRoom: unknown program '${String(o.program)}'`;
       }
-      if (!isFiniteNumber(o.areaWeight) || o.areaWeight <= 0) return "addRoom: areaWeight must be a positive number";
+      // areaWeight is a ratio between sibling rooms, not a dimension the user asked for,
+      // so a model omitting it is not a reason to fail the turn — fall back to the
+      // program's default rather than rejecting an otherwise well-formed op.
+      const areaWeight =
+        isFiniteNumber(o.areaWeight) && o.areaWeight > 0 ? o.areaWeight : DEFAULT_AREA_WEIGHT[o.program as RoomProgram];
       if (o.name !== undefined && typeof o.name !== "string") return "addRoom: name must be a string";
       if (o.adjacentTo !== undefined && typeof o.adjacentTo !== "string") return "addRoom: adjacentTo must be a string";
       if (o.roomId !== undefined && typeof o.roomId !== "string") return "addRoom: roomId must be a string";
       return {
         op: "addRoom",
         program: o.program as RoomProgram,
-        areaWeight: o.areaWeight,
+        areaWeight,
         name: o.name as string | undefined,
         adjacentTo: o.adjacentTo as string | undefined,
         roomId: o.roomId as string | undefined,
@@ -177,7 +181,7 @@ export function buildPatchJsonSchema(allowedOps: readonly string[]): Record<stri
         areaWeight: { type: "number" },
         adjacentTo: { type: "string" },
       },
-      required: ["op", "program", "areaWeight"],
+      required: ["op", "program"],
     },
     removeRoom: { type: "object", properties: { op: { const: "removeRoom" }, roomId: { type: "string" } }, required: ["op", "roomId"] },
     renameRoom: {

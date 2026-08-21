@@ -154,7 +154,15 @@ export class PlanStore {
     const historyBefore = [...this.record.chatHistory];
     this.record.chatHistory.push({ role: "user", text: utterance });
 
-    const outcome = await resolveTurn(this.record.doc, utterance, historyBefore, this.provider);
+    let outcome: Awaited<ReturnType<typeof resolveTurn>>;
+    try {
+      outcome = await resolveTurn(this.record.doc, utterance, historyBefore, this.provider);
+    } catch (e) {
+      // resolveTurn is meant to report failures as an "error" outcome rather than throw;
+      // if one ever escapes, it still has to land in the transcript and be persisted, or
+      // the user's own message is left dangling with no reply.
+      outcome = { kind: "error", message: `Something went wrong: ${(e as Error).message}. Your plan is unchanged.` };
+    }
 
     if (outcome.kind === "undo") {
       const undone = this.undo();

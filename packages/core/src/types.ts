@@ -51,6 +51,31 @@ export const ROOM_PROGRAM_MIN_DIMENSIONS: Record<RoomProgram, { minWidth: number
   other: { minWidth: 910, minDepth: 910 },
 };
 
+/**
+ * Relative area weight used when a room is added without one. areaWeight is a ratio
+ * between siblings, not a real dimension, so it is the kind of value a weak model has
+ * no good way to invent — callers that omit it get a sensible per-program default.
+ */
+export const DEFAULT_AREA_WEIGHT: Record<RoomProgram, number> = {
+  kitchen: 1.2,
+  living: 1.6,
+  family: 1.4,
+  dining: 1.0,
+  bedroom: 1.2,
+  "primary-bedroom": 1.6,
+  bath: 0.5,
+  "half-bath": 0.25,
+  laundry: 0.4,
+  office: 0.8,
+  garage: 1.8,
+  hallway: 0.4,
+  closet: 0.2,
+  pantry: 0.3,
+  entry: 0.4,
+  mudroom: 0.4,
+  other: 1.0,
+};
+
 /** Wet programs preferentially share a wall (SLV-2 item 4). */
 export const WET_PROGRAMS: ReadonlySet<RoomProgram> = new Set(["kitchen", "bath", "half-bath", "laundry"]);
 

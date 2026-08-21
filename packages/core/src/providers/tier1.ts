@@ -4,8 +4,9 @@
 
 import type { Patch, PlanSummary, Turn } from "../types.js";
 import type { Availability, PlanProvider } from "./types.js";
-import { FULL_PATCH_OPS, buildPatchJsonSchema, validatePatchResponse } from "./schema.js";
+import { FULL_PATCH_OPS, buildPatchJsonSchema } from "./schema.js";
 import { buildSystemPrompt, buildUserPrompt } from "./promptBuilder.js";
+import { safeJsonParse } from "./safeJsonParse.js";
 
 const TOKEN_BUDGET = 3000;
 
@@ -55,15 +56,9 @@ export class Tier1Provider implements PlanProvider {
     const contentType = res.headers.get("content-type") ?? "";
     const modelText = contentType.includes("text/event-stream") ? parseWorkersAiSse(text) : text;
 
-    let raw: unknown;
-    try {
-      raw = JSON.parse(modelText);
-    } catch (e) {
-      throw new Error(`Tier 1 response was not valid JSON: ${(e as Error).message}`);
-    }
-    const validated = validatePatchResponse(raw, FULL_PATCH_OPS);
-    if (!validated.ok) throw new Error(validated.error);
-    return validated.patch;
+    // Returned unvalidated on purpose — see the note in tier0.ts. Only transport-level
+    // failures (above) throw from here; a bad answer is the orchestrator's to retry.
+    return safeJsonParse(modelText) as Patch;
   }
 }
 

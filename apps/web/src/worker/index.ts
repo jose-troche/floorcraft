@@ -10,7 +10,12 @@ import { isRateLimited } from "./rateLimiter";
 import { readClientId, setClientIdCookie } from "./cookies";
 import { errorResponse } from "./redact";
 
-const DEFAULT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+// Workers AI retires models on a published schedule, and a retired id fails the whole
+// request (the previous default was deprecated out from under this Worker mid-flight).
+// Candidates are tried in order so a future retirement degrades to the next model
+// instead of taking Tier 1 down; TIER1_MODEL, when set, is tried first.
+const MODEL_CANDIDATES = ["@cf/meta/llama-3.2-3b-instruct", "@cf/meta/llama-3.2-1b-instruct"];
+const DEFAULT_MODEL = MODEL_CANDIDATES[0]!;
 const MAX_INFER_BODY_BYTES = 100_000;
 
 function getIp(request: Request): string {
@@ -84,18 +89,26 @@ async function handleInfer(request: Request, env: Env): Promise<Response> {
     indexes: [bucketKey.slice(0, 16)],
   });
 
-  const model = env.TIER1_MODEL ?? DEFAULT_MODEL;
+  const models = env.TIER1_MODEL ? [env.TIER1_MODEL, ...MODEL_CANDIDATES.filter((m) => m !== env.TIER1_MODEL)] : MODEL_CANDIDATES;
+  const messages = [
+    { role: "system", content: system },
+    { role: "user", content: user },
+  ];
+
   let aiResult: unknown;
-  try {
-    aiResult = await env.AI.run(model, {
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-      stream: true,
-    });
-  } catch (e) {
-    return errorResponse(`Inference failed: ${(e as Error).message}`, 502);
+  let firstError: Error | null = null;
+  for (const model of models) {
+    try {
+      aiResult = await env.AI.run(model, { messages, stream: true });
+      break;
+    } catch (e) {
+      // Keep the first failure: it names the configured model, which is the one worth
+      // fixing. Later candidates are only a safety net.
+      firstError ??= e as Error;
+    }
+  }
+  if (!aiResult) {
+    return errorResponse(`Inference failed: ${firstError?.message ?? "no model available"}`, 502);
   }
 
   responseHeaders.set("content-type", "text/event-stream");

@@ -49,24 +49,39 @@ export async function resolveTurn(
 
   const attempt = async (note?: string) => {
     const effectiveUtterance = note ? `${utterance}\n\n[${note}]` : utterance;
-    // Providers are only typed to return a Patch; we never trust that contractually — validate regardless.
-    const raw = (await provider.propose({ summary, utterance: effectiveUtterance, history })) as unknown;
+    let raw: unknown;
+    try {
+      // Providers are only typed to return a Patch; we never trust that contractually — validate regardless.
+      raw = (await provider.propose({ summary, utterance: effectiveUtterance, history })) as unknown;
+    } catch (e) {
+      // A provider that throws never reached the model (network, quota, an unavailable
+      // model). Distinguished from a validation failure because re-prompting a model
+      // that was never asked cannot fix it — see the retry policy below.
+      return { ok: false as const, failure: "transport" as const, error: (e as Error).message };
+    }
     const allowed = provider.tier === 0 ? CORE_PATCH_OPS : FULL_PATCH_OPS;
     const parsed = validatePatchResponse(raw, allowed);
-    if (!parsed.ok) return { ok: false as const, error: parsed.error };
+    if (!parsed.ok) return { ok: false as const, failure: "validation" as const, error: parsed.error };
     const applied = applyPatch(doc, parsed.patch);
-    if (!applied.ok) return { ok: false as const, error: describeApplyFailure(applied) };
+    if (!applied.ok) return { ok: false as const, failure: "validation" as const, error: describeApplyFailure(applied) };
     return { ok: true as const, patch: parsed.patch, doc: applied.doc, changes: applied.changes };
   };
 
   let result = await attempt();
-  if (!result.ok) {
+  // INF-4's automatic repair retry applies to an *invalid patch* — a model that answered
+  // badly. A transport failure gets no correction note (there is nothing to correct) and
+  // no second call, so a hard outage fails fast instead of hanging for two round trips.
+  if (!result.ok && result.failure === "validation") {
     result = await attempt(
       `Your previous response was invalid: ${result.error}. Reply again with corrected JSON only, following the schema exactly.`,
     );
   }
   if (!result.ok) {
-    return { kind: "error", message: `The assistant could not produce a valid plan change (${result.error}). The plan is unchanged.` };
+    const message =
+      result.failure === "transport"
+        ? `The assistant is unavailable right now (${result.error}). Your plan is unchanged — you can keep editing manually, or switch tiers in the header.`
+        : `The assistant could not produce a valid plan change (${result.error}). The plan is unchanged.`;
+    return { kind: "error", message };
   }
 
   return { kind: "provider", doc: result.doc, changes: result.changes, narration: result.patch.narration, providerId: provider.id };

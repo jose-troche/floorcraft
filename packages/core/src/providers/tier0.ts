@@ -3,8 +3,9 @@
 
 import type { Patch, PlanSummary, Turn } from "../types.js";
 import type { Availability, PlanProvider } from "./types.js";
-import { CORE_PATCH_OPS, buildPatchJsonSchema, validatePatchResponse } from "./schema.js";
+import { CORE_PATCH_OPS, buildPatchJsonSchema } from "./schema.js";
 import { buildSystemPrompt, buildUserPrompt } from "./promptBuilder.js";
+import { safeJsonParse } from "./safeJsonParse.js";
 
 const TOKEN_BUDGET = 1500; // T0-3
 
@@ -83,10 +84,10 @@ export class Tier0Provider implements PlanProvider {
     const session = base.clone ? await base.clone() : base;
     try {
       const text = await session.prompt(user, { responseConstraint: schema });
-      const raw = JSON.parse(text);
-      const validated = validatePatchResponse(raw, CORE_PATCH_OPS);
-      if (!validated.ok) throw new Error(validated.error);
-      return validated.patch;
+      // Returned unvalidated on purpose. The orchestrator validates every provider
+      // response anyway (INF-4), and it is the only layer that can run the repair
+      // retry — throwing here would turn a fixable bad answer into a dead turn.
+      return safeJsonParse(text) as Patch;
     } finally {
       if (session !== base) session.destroy?.();
     }

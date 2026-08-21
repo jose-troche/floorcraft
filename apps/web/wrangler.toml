@@ -38,7 +38,9 @@ dataset = "floorcraft_infer"
 TIER1_ENABLED = "true"
 DAILY_QUOTA_PER_CLIENT = "12"
 GLOBAL_NEURON_BUDGET = "7000"
-TIER1_MODEL = "@cf/meta/llama-3.1-8b-instruct"
+# Leave TIER1_MODEL unset to track the Worker's own candidate list, which falls back
+# across models if one is retired. Pin it only to force a specific model:
+# TIER1_MODEL = "@cf/meta/llama-3.2-3b-instruct"
 # Public site key for the "floorcraft-infer" Turnstile widget (invisible mode,
 # scoped to floorcraft.troche.workers.dev) — safe to commit, it's sent to the
 # client via /api/config. The paired secret key is set via `wrangler secret put`.

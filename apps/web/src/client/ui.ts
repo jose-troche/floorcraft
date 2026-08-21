@@ -18,6 +18,16 @@ import type { ProviderManager } from "./providers";
 
 type Tab = "chat" | "manual";
 
+/**
+ * User-facing names for the inference tiers. The spec's "Tier 0/1" vocabulary is an
+ * architectural label, not something to put in front of someone drawing a floor plan —
+ * what they care about is where the work happens and whether it's private to them.
+ */
+const TIER_NAMES: Record<"tier0-on-device" | "tier1-hosted", { badge: string; sentence: string; option: string }> = {
+  "tier0-on-device": { badge: "On-device AI", sentence: "the AI on your device", option: "On-device AI (private, no network)" },
+  "tier1-hosted": { badge: "Cloud AI", sentence: "the cloud AI", option: "Cloud AI (shared free pool)" },
+};
+
 export class AppUI {
   private tab: Tab = "chat";
   private error: string | null = null;
@@ -60,12 +70,7 @@ export class AppUI {
 
     const badge = document.createElement("span");
     badge.className = "tier-badge";
-    const tierText =
-      providerState.activeId === "tier0-on-device"
-        ? "Tier 0 · on-device"
-        : providerState.activeId === "tier1-hosted"
-          ? "Tier 1 · hosted"
-          : "Manual editing only";
+    const tierText = providerState.activeId ? TIER_NAMES[providerState.activeId].badge : "Manual editing only";
     if (this.chatBusy) {
       badge.classList.add("busy");
       const spinner = document.createElement("span");
@@ -80,10 +85,10 @@ export class AppUI {
     const tierSelect = document.createElement("select");
     tierSelect.setAttribute("aria-label", "Inference tier");
     const options: Array<[string, string]> = [
-      ["auto", "Auto"],
-      ["tier0-on-device", "Tier 0 (on-device)"],
-      ["tier1-hosted", "Tier 1 (hosted)"],
-      ["none", "None (manual only)"],
+      ["auto", "Automatic"],
+      ["tier0-on-device", TIER_NAMES["tier0-on-device"].option],
+      ["tier1-hosted", TIER_NAMES["tier1-hosted"].option],
+      ["none", "Manual editing only"],
     ];
     for (const [value, label] of options) {
       const opt = document.createElement("option");
@@ -213,27 +218,27 @@ export class AppUI {
     send.textContent = this.chatBusy ? "…" : "Send";
     send.disabled = chatDisabled || this.chatBusy;
 
-    const tierLabel =
-      providerState.activeId === "tier0-on-device"
-        ? "Tier 0 (on-device)"
-        : providerState.activeId === "tier1-hosted"
-          ? "Tier 1 (hosted)"
-          : null;
+    const tierLabel = providerState.activeId ? TIER_NAMES[providerState.activeId].sentence : null;
 
     const submit = async () => {
       const text = input.value.trim();
       if (!text || this.chatBusy) return;
       this.error = null;
       this.chatBusy = true;
-      this.pendingLabel = tierLabel
-        ? `Trying a direct command first, then asking ${tierLabel} if needed — this can take several seconds…`
-        : "Working…";
+      this.pendingLabel = tierLabel ? `Working on your plan with ${tierLabel}…` : "Working on your plan…";
       this.render();
-      const result = await this.store.submitChatTurn(text);
-      this.chatBusy = false;
-      this.pendingLabel = null;
-      if (result.kind === "error") this.error = result.message;
-      this.render();
+      try {
+        const result = await this.store.submitChatTurn(text);
+        if (result.kind === "error") this.error = result.message;
+      } catch (e) {
+        // The busy state must never outlive the turn: a stuck spinner tells the user
+        // work is still happening when it has already failed.
+        this.error = `Something went wrong: ${(e as Error).message}. Your plan is unchanged.`;
+      } finally {
+        this.chatBusy = false;
+        this.pendingLabel = null;
+        this.render();
+      }
     };
 
     input.onkeydown = (e) => {
