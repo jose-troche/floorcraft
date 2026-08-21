@@ -8,6 +8,7 @@ export * from "./svgRenderer.js";
 export * from "./jsonExport.js";
 export * from "./intentMatcher.js";
 export * from "./orchestrator.js";
+export * from "./turnMessage.js";
 export * from "./providers/types.js";
 export * from "./providers/schema.js";
 export * from "./providers/promptBuilder.js";

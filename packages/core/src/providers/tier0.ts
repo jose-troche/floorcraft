@@ -32,6 +32,7 @@ export class Tier0Provider implements PlanProvider {
   // Reused across turns so the model's weights/context aren't reinitialized on every
   // message — creating a session is the expensive part, not prompting an existing one.
   private baseSessionPromise: Promise<LanguageModelSession> | null = null;
+  private baseSessionSystem: string | null = null;
 
   /**
    * Fires off session creation without waiting on it, so the model is already warm by
@@ -59,9 +60,19 @@ export class Tier0Provider implements PlanProvider {
   }
 
   private getBaseSession(lm: BrowserLanguageModel, system: string): Promise<LanguageModelSession> {
+    // A cached session is only reusable if it was primed with this exact system prompt.
+    // warmup() and propose() build it from the same op vocabulary today, but a cache
+    // keyed on nothing would silently serve the wrong prompt the day they diverge.
+    if (this.baseSessionPromise && this.baseSessionSystem !== system) {
+      const stale = this.baseSessionPromise;
+      this.baseSessionPromise = null;
+      void stale.then((s) => s.destroy?.()).catch(() => {});
+    }
     if (!this.baseSessionPromise) {
+      this.baseSessionSystem = system;
       this.baseSessionPromise = lm.create({ initialPrompts: [{ role: "system", content: system }] }).catch((err) => {
         this.baseSessionPromise = null;
+        this.baseSessionSystem = null;
         throw err;
       });
     }

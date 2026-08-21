@@ -4,6 +4,7 @@
 import {
   applyPatch,
   createEmptyPlan,
+  formatAppliedTurn,
   resolveTurn,
   type Patch,
   type PatchOp,
@@ -185,9 +186,9 @@ export class PlanStore {
 
     this.pushUndo(this.record.doc);
     this.record.doc = outcome.doc;
-    const narrationPrefix = outcome.kind === "provider" && outcome.narration ? `${outcome.narration} ` : "";
-    const changeSummary = outcome.changes.length > 0 ? outcome.changes.join(", ") : "No visible changes.";
-    this.record.chatHistory.push({ role: "assistant", text: `${narrationPrefix}${changeSummary}` });
+    const narration = outcome.kind === "provider" ? outcome.narration : undefined;
+    const text = formatAppliedTurn({ changes: outcome.changes, narration });
+    this.record.chatHistory.push({ role: "assistant", text });
     await this.persist();
     this.emit();
     return { kind: "applied", changes: outcome.changes, narration: outcome.kind === "provider" ? outcome.narration : undefined };

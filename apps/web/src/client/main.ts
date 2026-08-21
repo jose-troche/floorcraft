@@ -13,6 +13,11 @@ async function main(): Promise<void> {
   const ui = new AppUI(root, store, providers);
   ui.render();
 
+  // Track the active provider for the whole session instead of reading it once: Tier 0
+  // now goes live partway through init(), and the store has to see that the moment it
+  // happens or the first turn would still be routed to "no provider".
+  providers.subscribe(() => store.setProvider(providers.getActiveProvider()));
+
   await providers.init();
   store.setProvider(providers.getActiveProvider());
 

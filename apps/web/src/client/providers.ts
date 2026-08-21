@@ -26,8 +26,20 @@ export class ProviderManager {
   private listeners: Array<(s: ProviderState) => void> = [];
   private tier0Availability: Availability = "unavailable";
   private tier1Availability: Availability = "unavailable";
+  // Set once the user picks a tier by hand, so a late-arriving Tier 1 can't yank the
+  // selection back out from under them mid-session (RTE-2 beats RTE-1).
+  private manuallySelected = false;
 
   async init(): Promise<void> {
+    // Tier 0 is the whole reason a first turn can feel instant, and nothing about it
+    // needs the network — so probe and warm it *before* awaiting /api/config and the
+    // Turnstile script, not after. Sequencing it behind those meant the on-device
+    // session only started loading once a third-party script had finished downloading,
+    // which is exactly the cold start warmup() exists to hide. The catch is attached now
+    // rather than at the await below, which only lands once the network work is done —
+    // long enough for a rejection to be reported as unhandled in the meantime.
+    const tier0Ready = this.initTier0().catch(() => {});
+
     let config: ConfigResponse = {};
     try {
       const res = await fetch("/api/config");
@@ -37,12 +49,28 @@ export class ProviderManager {
     }
 
     if (config.tier1Enabled && config.turnstileSiteKey) {
-      await initTurnstile(config.turnstileSiteKey);
-      this.tier1 = new Tier1Provider({ getTurnstileToken: () => getTurnstileToken() });
+      try {
+        await initTurnstile(config.turnstileSiteKey);
+        this.tier1 = new Tier1Provider({ getTurnstileToken: () => getTurnstileToken() });
+      } catch {
+        // Turnstile blocked (extension, offline, CSP) means Tier 1 has no token to send,
+        // so it stays unavailable — but it must not take Tier 0 or the manual editor
+        // down with it, which is what letting this reject did.
+      }
     }
 
-    await this.refreshAvailability();
-    this.autoSelect();
+    await tier0Ready;
+    this.tier1Availability = this.tier1 ? await this.tier1.availability() : "unavailable";
+    this.applyAutoSelection();
+  }
+
+  /** Probes Tier 0 and starts its session warm-up, publishing the result as soon as it lands. */
+  private async initTier0(): Promise<void> {
+    this.tier0Availability = await this.tier0.availability();
+    if (this.tier0Availability === "available") this.tier0.warmup();
+    // Select immediately rather than waiting on Tier 1: when Tier 0 is there it wins
+    // outright (RTE-1), so chat can go live while the rest of init is still in flight.
+    this.applyAutoSelection();
   }
 
   async refreshAvailability(): Promise<void> {
@@ -52,8 +80,15 @@ export class ProviderManager {
     this.emit();
   }
 
-  /** RTE-1: Tier 0 if available, else Tier 1 if quota remains, else none. */
+  /** RTE-2: the user explicitly choosing "Auto" — hands routing back to RTE-1. */
   autoSelect(): void {
+    this.manuallySelected = false;
+    this.applyAutoSelection();
+  }
+
+  /** RTE-1's routing, but only while the user hasn't overridden it by hand. */
+  private applyAutoSelection(): void {
+    if (this.manuallySelected) return;
     if (this.tier0Availability === "available") {
       this.activeId = "tier0-on-device";
     } else if (this.tier1 && (this.tier1Availability === "available" || this.tier1Availability === "downloadable")) {
@@ -66,6 +101,7 @@ export class ProviderManager {
 
   /** RTE-2: manual override, always available regardless of auto-selection. */
   setActive(id: ProviderId | null): void {
+    this.manuallySelected = true;
     this.activeId = id;
     this.emit();
   }
