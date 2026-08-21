@@ -73,6 +73,18 @@ function nextRoomSeq(existingIds: Iterable<RoomId>): number {
   return max + 1;
 }
 
+/**
+ * Picks the id for a newly added room. Providers are untrusted (INF-4): a model shown
+ * the plan summary will sometimes echo an existing roomId back on addRoom. "Add a room"
+ * is never ambiguous enough to fail the turn over that, so a taken id is replaced with
+ * a fresh one rather than rejected. Skips ids already claimed earlier in this patch.
+ */
+function allocateRoomId(state: LevelState, requested?: RoomId): RoomId {
+  if (requested && !state.roomMeta[requested]) return requested;
+  while (state.roomMeta[`room-${state.roomSeq}`]) state.roomSeq++;
+  return `room-${state.roomSeq++}`;
+}
+
 function levelStateFromDoc(doc: PlanDocument, level: Level): LevelState {
   const roomMeta: Record<RoomId, RoomMeta> = {};
   for (const [roomId, room] of Object.entries(level.graph.rooms)) {
@@ -109,19 +121,17 @@ function applyTreeOps(
   state: LevelState,
   ops: PatchOp[],
   beforeAreas: Record<RoomId, number>,
-): { openingOps: Extract<PatchOp, { op: "addOpening" | "removeOpening" }>[]; errors: string[] } {
+): { openingOps: Extract<PatchOp, { op: "addOpening" | "removeOpening" }>[]; errors: string[]; addedRoomIds: RoomId[] } {
   const openingOps: Extract<PatchOp, { op: "addOpening" | "removeOpening" }>[] = [];
   const errors: string[] = [];
+  /** Ids actually allocated by addRoom ops, in order, so the change summary can name them. */
+  const addedRoomIds: RoomId[] = [];
 
   for (const op of ops) {
     switch (op.op) {
       case "addRoom": {
-        const roomId = op.roomId ?? `room-${state.roomSeq}`;
-        state.roomSeq++;
-        if (state.roomMeta[roomId]) {
-          errors.push(`addRoom: roomId ${roomId} already exists`);
-          break;
-        }
+        const roomId = allocateRoomId(state, op.roomId);
+        addedRoomIds.push(roomId);
         const { minWidth, minDepth } = minSizeFor(op.program, op.constraints);
         const leaf: SlicingLeaf = { kind: "leaf", roomId, areaWeight: op.areaWeight, minWidth, minDepth };
         state.roomMeta[roomId] = {
@@ -276,7 +286,7 @@ function applyTreeOps(
     }
   }
 
-  return { openingOps, errors };
+  return { openingOps, errors, addedRoomIds };
 }
 
 function findSharedEdge(graph: WallGraph, roomA: RoomId, roomB: RoomId): string | undefined {
@@ -325,15 +335,21 @@ function summarizeChanges(
   beforeAreas: Record<RoomId, number>,
   afterAreas: Record<RoomId, number>,
   nameOf: (roomId: RoomId) => string,
+  addedRoomIds: RoomId[],
 ): string[] {
   const changes: string[] = [];
   const resized = new Set<RoomId>();
+  // addRoom ops consume allocated ids in order — the op's own roomId is often absent
+  // (or, from a provider, a duplicate the reducer replaced), so it can't name the room.
+  let addedIndex = 0;
 
   for (const op of ops) {
     switch (op.op) {
-      case "addRoom":
-        changes.push(`Added ${nameOf(op.roomId ?? "")}`.trim());
+      case "addRoom": {
+        const addedId = addedRoomIds[addedIndex++];
+        changes.push(addedId ? `Added ${nameOf(addedId)}` : "Added a room");
         break;
+      }
       case "removeRoom":
         changes.push(`Removed ${nameOf(op.roomId)}`);
         break;
@@ -386,7 +402,7 @@ export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
   for (const [id, r] of Object.entries(level.graph.rooms)) namesBefore[id] = r.name;
 
   const state = levelStateFromDoc(doc, level);
-  const { openingOps, errors } = applyTreeOps(state, patch.ops, beforeAreas);
+  const { openingOps, errors, addedRoomIds } = applyTreeOps(state, patch.ops, beforeAreas);
   if (errors.length > 0) return { ok: false, errors };
 
   let graph: WallGraph;
@@ -421,7 +437,7 @@ export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
 
   const nameOf = (roomId: RoomId) => graph.rooms[roomId]?.name ?? namesBefore[roomId] ?? roomId;
   const afterAreas = leafAreas(afterLeaves);
-  const changes = summarizeChanges(patch.ops, beforeAreas, afterAreas, nameOf);
+  const changes = summarizeChanges(patch.ops, beforeAreas, afterAreas, nameOf, addedRoomIds);
 
   return { ok: true, doc: newDoc, changes };
 }

@@ -93,6 +93,35 @@ describe("applyPatch", () => {
     expect(Object.keys(activeLevel(result.doc).graph.rooms).sort()).toEqual(["room-0", "room-2", "room-3", "room-4"]);
   });
 
+  it("reassigns a fresh id when a provider echoes back an existing roomId on addRoom", () => {
+    const doc = basePlan();
+    let { doc: d } = apply(doc, [{ op: "addRoom", roomId: "room-0", program: "kitchen", areaWeight: 1 }]);
+    ({ doc: d } = apply(d, [{ op: "addRoom", roomId: "room-1", program: "office", areaWeight: 1 }]));
+    // A model shown the plan summary echoes an id that is already taken.
+    const result = apply(d, [{ op: "addRoom", roomId: "room-1", program: "bath", areaWeight: 0.5 }]);
+    const rooms = activeLevel(result.doc).graph.rooms;
+    expect(Object.keys(rooms).sort()).toEqual(["room-0", "room-1", "room-2"]);
+    // The pre-existing room-1 keeps its own program; the new room lands on a fresh id.
+    expect(rooms["room-1"]!.program).toBe("office");
+    expect(rooms["room-2"]!.program).toBe("bath");
+  });
+
+  it("names the added room in the change summary even when the op carries no roomId", () => {
+    const doc = basePlan();
+    const { changes } = apply(doc, [{ op: "addRoom", program: "kitchen", areaWeight: 1 }]);
+    expect(changes).toContain("Added Kitchen");
+  });
+
+  it("keeps ids unique across several addRoom ops in a single patch", () => {
+    const doc = basePlan();
+    const result = apply(doc, [
+      { op: "addRoom", roomId: "room-0", program: "kitchen", areaWeight: 1 },
+      { op: "addRoom", roomId: "room-0", program: "bath", areaWeight: 0.5 },
+      { op: "addRoom", program: "office", areaWeight: 1 },
+    ]);
+    expect(Object.keys(activeLevel(result.doc).graph.rooms).sort()).toEqual(["room-0", "room-1", "room-2"]);
+  });
+
   it("reports a per-room percentage change for resizeRoom", () => {
     const doc = basePlan();
     let { doc: d } = apply(doc, [{ op: "addRoom", roomId: "kitchen", program: "kitchen", areaWeight: 1 }]);
