@@ -18,7 +18,7 @@ binding = "AI"
 [[d1_databases]]
 binding = "DB"
 database_name = "floorcraft"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "45823d29-2c6c-4743-82d8-10cd49b81453"
 
 # Analytics Engine — neuron-cost logging (T1-5). Optional; omit this block if
 # your account doesn't have it enabled and the Worker will just skip logging.
@@ -26,9 +26,13 @@ database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 binding = "ANALYTICS"
 dataset = "floorcraft_infer"
 
-# Daily cron: prunes quota rows older than 7 days (CF-5).
-[triggers]
-crons = ["0 3 * * *"]
+# Daily cron: prunes quota rows older than 7 days (CF-5, a SHOULD not a MUST).
+# Left disabled — this account is already at the Workers Free plan's 5-cron-trigger
+# limit across other Workers. The `scheduled()` handler in src/worker/index.ts is
+# still there; add a trigger here (freeing a slot elsewhere, or on Workers Paid)
+# when you want it running:
+# [triggers]
+# crons = ["0 3 * * *"]
 
 [vars]
 TIER1_ENABLED = "true"
