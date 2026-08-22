@@ -38,6 +38,35 @@ Every canvas gesture is turned into ordinary patch ops and applied through the
 same reducer as a chat turn, so direct manipulation is undoable like anything
 else (FR-3) and the language model never emits geometry (§1.2).
 
+### Commands resolved without inference (INF-5, DIM-1..DIM-6)
+
+These are handled by `intentMatcher.ts` and `dimensionParser.ts` before any
+provider is consulted, so they cost nothing and behave identically on every
+tier:
+
+| Shape | Examples |
+|---|---|
+| Placement | `add a kitchen to the left of the office`, `add a bedroom above the kitchen`, `add a closet inside the office`, `add a pantry next to the kitchen`, `move the kitchen to the right of the office` |
+| Creation with size | `add a room 3 x 4 ft`, `add a bedroom 12x14 feet to the left of the office` |
+| Pinning a size | `kitchen is 4x5 feet`, `make the hallway 3 feet wide`, `living room at least 300 sq ft` |
+| Relative resize | `reduce the kitchen by 40%`, `increase the kitchen width by 3 meters`, `increase the office length by 30%` |
+| Everything else | rename, swap, delete, undo/redo, change units |
+
+`left`/`right` cut vertically and `above`/`below` horizontally. `inside` is an
+approximation with a reason: a slicing tree is a guillotine partition and cannot
+enclose one room in another (that needs FR-11's L-shapes, Phase 3), so it
+partitions the host room instead — which is what a closet in an office is.
+
+**Ambiguity is a question, not a guess.** "delete the bedroom" in a plan with
+two bedrooms returns a clarifying question and leaves the plan untouched,
+rather than destroying whichever one sorted first; the same applies to renaming,
+swapping, resizing, and to the anchor room in a placement. A request naming a
+room that doesn't exist, or a kind of room that isn't recognised, also asks.
+These questions are deliberately *not* forwarded to a provider — a model asked
+"which bedroom?" answers by picking one, which is the guess being avoided.
+Multi-room requests (`add a kitchen, a living room and two bedrooms`) still go
+to a provider, which can express the whole request rather than half of it.
+
 ### DXF golden fixture (FR-17)
 
 `packages/core/test/golden/plan.dxf` is byte-compared in CI against a fixed
