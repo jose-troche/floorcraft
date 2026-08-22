@@ -25,6 +25,15 @@ export const FULL_PATCH_OPS = [
   "setDimensionRange",
 ] as const;
 
+/**
+ * Ops a person produces by dragging on the canvas (FR-7), deliberately kept out of
+ * FULL_PATCH_OPS. They carry raw coordinates and ratios, and the first design decision
+ * of the whole system is that the language model never emits geometry (§1.2) — a model
+ * asked for a label position or an opening offset has no way to know what is right.
+ * They are listed here so the vocabulary stays enumerable in one place (INF-7).
+ */
+export const USER_ONLY_PATCH_OPS = ["moveOpening", "setOpeningSwing", "setLabelAnchor"] as const;
+
 export type OpName = (typeof FULL_PATCH_OPS)[number];
 
 const ROOM_PROGRAMS = Object.keys(ROOM_PROGRAM_MIN_DIMENSIONS) as RoomProgram[];
@@ -103,6 +112,9 @@ function validateOp(raw: unknown, allowed: ReadonlySet<string>): PatchOp | strin
     case "addOpening": {
       if (!["door", "window", "cased", "pass-through"].includes(o.kind as string)) return "addOpening: invalid kind";
       if (!o.betweenRooms && !o.edgeId) return "addOpening: betweenRooms or edgeId is required";
+      // offsetRatio and swing are reachable on this op from the canvas but are not
+      // copied through from a provider: placement along the wall is geometry, and the
+      // reducer's centred default is better than a number a model guessed.
       return {
         op: "addOpening",
         kind: o.kind as "door" | "window" | "cased" | "pass-through",

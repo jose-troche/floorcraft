@@ -93,6 +93,38 @@ export type Opening = {
   swing?: DoorSwing;
 };
 
+/** Which side of a room's bounding rectangle a wall run sits on. y increases downward. */
+export type RoomSide = "top" | "right" | "bottom" | "left";
+
+/**
+ * How an opening is anchored to the plan, independently of any particular edge id.
+ *
+ * Edge ids are regenerated from scratch every time the wall graph is rebuilt (which is
+ * every patch), so an opening that remembered an EdgeId would be orphaned by the next
+ * edit. Anchors are semantic — "the wall between the kitchen and the hall", "the north
+ * wall of the living room" — and are re-resolved against the fresh graph after each solve.
+ */
+export type OpeningAnchor =
+  | { kind: "between"; rooms: [RoomId, RoomId] }
+  | { kind: "exterior"; roomId: RoomId; side: RoomSide };
+
+/**
+ * The persisted form of an opening (DM-5's spirit: store intent, derive geometry).
+ * `offsetRatio` positions it along the resolved wall run as a fraction of the run's
+ * slidable range, so it keeps its relative placement when the wall changes length.
+ */
+export type PersistedOpening = {
+  id: OpeningId;
+  kind: OpeningKind;
+  anchor: OpeningAnchor;
+  /** 0..1 along the resolved wall run's slidable range. */
+  offsetRatio: number;
+  width: number;
+  height: number;
+  sill?: number;
+  swing?: DoorSwing;
+};
+
 export type EdgeType = "exterior" | "interior" | "partition";
 
 export type WallEdge = {
@@ -168,6 +200,12 @@ export type Level = {
   /** Outer boundary of the level, mm. Origin at (0,0), rectangle width x depth. */
   boundary: { widthMm: number; depthMm: number };
   generator?: Generator;
+  /**
+   * Openings survive regeneration here, not in the graph: `graph.edges[].openings` is
+   * derived from this list after every solve. Optional so documents written before
+   * Phase 2 load unchanged.
+   */
+  openings?: PersistedOpening[];
   graph: WallGraph;
 };
 
@@ -199,8 +237,13 @@ export type PatchOp =
   | { op: "swapRooms"; roomIdA: RoomId; roomIdB: RoomId }
   | { op: "moveRoom"; roomId: RoomId; relativeTo: RoomId; direction: "left" | "right" | "above" | "below" }
   | { op: "setSplit"; nodePath: NodePath; axis?: "h" | "v"; ratio?: number }
-  | { op: "addOpening"; betweenRooms?: [RoomId, RoomId]; edgeId?: EdgeId; kind: OpeningKind; width?: number }
+  | { op: "addOpening"; betweenRooms?: [RoomId, RoomId]; edgeId?: EdgeId; kind: OpeningKind; width?: number; offsetRatio?: number; swing?: DoorSwing }
   | { op: "removeOpening"; openingId: OpeningId }
+  // Direct-manipulation ops (FR-7). Never emitted by a provider — see USER_ONLY_PATCH_OPS
+  // in providers/schema.ts for why the model is kept away from coordinates.
+  | { op: "moveOpening"; openingId: OpeningId; offsetRatio: number }
+  | { op: "setOpeningSwing"; openingId: OpeningId; swing: DoorSwing }
+  | { op: "setLabelAnchor"; roomId: RoomId; x: number; y: number }
   | { op: "setBoundary"; widthMm: number; depthMm: number }
   | { op: "setUnits"; units: Units }
   | { op: "setDimension"; roomId: RoomId; dimensionType: DimensionType; value: number; unit?: "ft" | "m" }

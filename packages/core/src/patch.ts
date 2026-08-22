@@ -1,16 +1,17 @@
 // Patch reducer — specs.md §5.2. Applies a closed vocabulary of ops (INF-6) to a
-// PlanDocument: tree-affecting ops mutate the SlicingTree generator and room
-// metadata, then the wall graph is regenerated once (SLV-1/2/3); graph-affecting
-// ops (openings) are applied against the freshly solved graph.
+// PlanDocument: every op edits level state (the SlicingTree generator, room metadata,
+// the persisted opening list), then the wall graph is regenerated once (SLV-1/2/3) and
+// the openings are resolved onto the fresh edges.
 
 import {
   ROOM_PROGRAM_MIN_DIMENSIONS,
   emptyWallGraph,
+  type DoorSwing,
   type Level,
-  type Opening,
   type OpeningKind,
   type Patch,
   type PatchOp,
+  type PersistedOpening,
   type PlanDocument,
   type Room,
   type RoomConstraints,
@@ -23,6 +24,7 @@ import {
 } from "./types.js";
 import { solveSlicingTree, type LeafRect } from "./slicingSolver.js";
 import { buildWallGraph, type RoomMeta } from "./wallGraph.js";
+import { anchorForEdge, applyOpeningsToGraph } from "./openings.js";
 import { findLeafPath, getNodeAt, insertLeaf, removeLeaf, setSplitAt, swapLeaves, totalAreaWeight, updateLeaf } from "./treeOps.js";
 
 export type ApplyPatchResult =
@@ -35,6 +37,16 @@ const DEFAULT_OPENING_WIDTH: Record<OpeningKind, number> = {
   cased: 1520,
   "pass-through": 910,
 };
+
+const DEFAULT_OPENING_HEIGHT: Record<OpeningKind, number> = {
+  door: 2030,
+  window: 1220,
+  cased: 2030,
+  "pass-through": 1220,
+};
+
+/** Head height of a window above the finished floor; sill follows from the height. */
+const WINDOW_HEAD_MM = 2030;
 
 function defaultNameFor(program: RoomProgram, existingCount: number): string {
   const label = program
@@ -54,9 +66,17 @@ function minSizeFor(program: RoomProgram, constraints?: RoomConstraints): { minW
 type LevelState = {
   tree: SlicingTree | undefined;
   roomMeta: Record<RoomId, RoomMeta>;
+  openings: PersistedOpening[];
   boundary: { widthMm: number; depthMm: number };
   units: PlanDocument["units"];
   roomSeq: number;
+  openingSeq: number;
+  /**
+   * The graph as it stood before this patch. Only read to turn an EdgeId supplied by a
+   * caller into a durable anchor — the edge itself ceases to exist the moment the
+   * graph is regenerated below.
+   */
+  graphBefore: WallGraph;
 };
 
 /**
@@ -85,17 +105,31 @@ function allocateRoomId(state: LevelState, requested?: RoomId): RoomId {
   return `room-${state.roomSeq++}`;
 }
 
+/** Same reasoning as nextRoomSeq: ids must clear every id in use, not merely count survivors. */
+function nextOpeningSeq(openings: readonly PersistedOpening[]): number {
+  let max = -1;
+  for (const o of openings) {
+    const match = /^opening-(\d+)$/.exec(o.id);
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return max + 1;
+}
+
 function levelStateFromDoc(doc: PlanDocument, level: Level): LevelState {
   const roomMeta: Record<RoomId, RoomMeta> = {};
   for (const [roomId, room] of Object.entries(level.graph.rooms)) {
     roomMeta[roomId] = { name: room.name, program: room.program, constraints: room.constraints, labelAnchor: room.labelAnchor };
   }
+  const openings = (level.openings ?? []).map((o) => ({ ...o }));
   return {
     tree: level.generator?.tree,
     roomMeta,
+    openings,
     boundary: level.boundary,
     units: doc.units,
     roomSeq: nextRoomSeq(Object.keys(level.graph.rooms)),
+    openingSeq: nextOpeningSeq(openings),
+    graphBefore: level.graph,
   };
 }
 
@@ -116,14 +150,14 @@ function applyDimensionOp(
   return null;
 }
 
-/** Applies the tree/metadata-affecting ops; returns opening ops to run after the solve, and any errors. */
+/** Applies every op to level state. Geometry is not touched here — the caller re-solves once afterwards. */
 function applyTreeOps(
   state: LevelState,
   ops: PatchOp[],
   beforeAreas: Record<RoomId, number>,
-): { openingOps: Extract<PatchOp, { op: "addOpening" | "removeOpening" }>[]; errors: string[]; addedRoomIds: RoomId[] } {
-  const openingOps: Extract<PatchOp, { op: "addOpening" | "removeOpening" }>[] = [];
+): { errors: string[]; addedRoomIds: RoomId[]; addedOpeningIds: string[] } {
   const errors: string[] = [];
+  const addedOpeningIds: string[] = [];
   /** Ids actually allocated by addRoom ops, in order, so the change summary can name them. */
   const addedRoomIds: RoomId[] = [];
 
@@ -149,6 +183,11 @@ function applyTreeOps(
         }
         state.tree = removeLeaf(state.tree, op.roomId) ?? undefined;
         delete state.roomMeta[op.roomId];
+        // An opening anchored to a room that no longer exists can never resolve again.
+        // Undo restores the whole document, so dropping them here loses nothing.
+        state.openings = state.openings.filter((o) =>
+          o.anchor.kind === "between" ? !o.anchor.rooms.includes(op.roomId) : o.anchor.roomId !== op.roomId,
+        );
         break;
       }
       case "renameRoom": {
@@ -279,49 +318,82 @@ function applyTreeOps(
         if (err) errors.push(`setDimensionRange: ${err}`);
         break;
       }
-      case "addOpening":
-      case "removeOpening":
-        openingOps.push(op);
-        break;
-    }
-  }
-
-  return { openingOps, errors, addedRoomIds };
-}
-
-function findSharedEdge(graph: WallGraph, roomA: RoomId, roomB: RoomId): string | undefined {
-  const a = graph.rooms[roomA];
-  const b = graph.rooms[roomB];
-  if (!a || !b) return undefined;
-  const setB = new Set(b.boundary);
-  return a.boundary.find((e) => setB.has(e));
-}
-
-function applyOpeningOps(graph: WallGraph, ops: Extract<PatchOp, { op: "addOpening" | "removeOpening" }>[]): void {
-  let seq = 0;
-  for (const op of ops) {
-    if (op.op === "addOpening") {
-      const edgeId = op.edgeId ?? (op.betweenRooms ? findSharedEdge(graph, op.betweenRooms[0], op.betweenRooms[1]) : undefined);
-      const edge = edgeId ? graph.edges[edgeId] : undefined;
-      if (!edge) continue;
-      const width = op.width ?? DEFAULT_OPENING_WIDTH[op.kind];
-      const a = graph.nodes[edge.a]!;
-      const b = graph.nodes[edge.b]!;
-      const length = Math.hypot(b.x - a.x, b.y - a.y);
-      const clampedWidth = Math.min(width, Math.max(length - 1, 1));
-      const offset = Math.max(0, (length - clampedWidth) / 2);
-      const opening: Opening = { id: `o${seq++}-${edgeId}`, kind: op.kind, offset, width: clampedWidth, height: op.kind === "window" ? 1220 : 2030 };
-      edge.openings.push(opening);
-    } else {
-      for (const edge of Object.values(graph.edges)) {
-        const idx = edge.openings.findIndex((o) => o.id === op.openingId);
-        if (idx >= 0) {
-          edge.openings.splice(idx, 1);
+      case "addOpening": {
+        const anchor = resolveAnchorForAdd(state, op);
+        if (!anchor) {
+          errors.push(`addOpening: no wall found for the requested location`);
           break;
         }
+        const id = `opening-${state.openingSeq++}`;
+        const height = DEFAULT_OPENING_HEIGHT[op.kind];
+        state.openings.push({
+          id,
+          kind: op.kind,
+          anchor,
+          offsetRatio: op.offsetRatio !== undefined ? Math.min(Math.max(op.offsetRatio, 0), 1) : 0.5,
+          width: op.width ?? DEFAULT_OPENING_WIDTH[op.kind],
+          height,
+          ...(op.kind === "window" ? { sill: Math.max(WINDOW_HEAD_MM - height, 0) } : {}),
+          ...(op.kind === "door" ? { swing: op.swing ?? "left-in" } : op.swing ? { swing: op.swing } : {}),
+        });
+        addedOpeningIds.push(id);
+        break;
+      }
+      case "removeOpening": {
+        const idx = state.openings.findIndex((o) => o.id === op.openingId);
+        if (idx < 0) {
+          errors.push(`removeOpening: opening ${op.openingId} not found`);
+          break;
+        }
+        state.openings.splice(idx, 1);
+        break;
+      }
+      case "moveOpening": {
+        const opening = state.openings.find((o) => o.id === op.openingId);
+        if (!opening) {
+          errors.push(`moveOpening: opening ${op.openingId} not found`);
+          break;
+        }
+        opening.offsetRatio = Math.min(Math.max(op.offsetRatio, 0), 1);
+        break;
+      }
+      case "setOpeningSwing": {
+        const opening = state.openings.find((o) => o.id === op.openingId);
+        if (!opening) {
+          errors.push(`setOpeningSwing: opening ${op.openingId} not found`);
+          break;
+        }
+        opening.swing = op.swing;
+        break;
+      }
+      case "setLabelAnchor": {
+        const meta = state.roomMeta[op.roomId];
+        if (!meta) {
+          errors.push(`setLabelAnchor: room ${op.roomId} not found`);
+          break;
+        }
+        state.roomMeta[op.roomId] = { ...meta, labelAnchor: { x: op.x, y: op.y } };
+        break;
       }
     }
   }
+
+  return { errors, addedRoomIds, addedOpeningIds };
+}
+
+/**
+ * Turns an addOpening op into a durable anchor. `betweenRooms` is already durable;
+ * an `edgeId` refers to the pre-patch graph and has to be translated before that
+ * graph is thrown away.
+ */
+function resolveAnchorForAdd(state: LevelState, op: Extract<PatchOp, { op: "addOpening" }>) {
+  if (op.betweenRooms) {
+    const [a, b] = op.betweenRooms;
+    if (!state.roomMeta[a] || !state.roomMeta[b]) return null;
+    return { kind: "between" as const, rooms: (a < b ? [a, b] : [b, a]) as [RoomId, RoomId] };
+  }
+  if (op.edgeId) return anchorForEdge(state.graphBefore, op.edgeId);
+  return null;
 }
 
 function leafAreas(leaves: LeafRect[]): Record<RoomId, number> {
@@ -336,9 +408,21 @@ function summarizeChanges(
   afterAreas: Record<RoomId, number>,
   nameOf: (roomId: RoomId) => string,
   addedRoomIds: RoomId[],
+  after: { graph: WallGraph; openings: PersistedOpening[]; addedOpeningIds: string[] },
 ): string[] {
   const changes: string[] = [];
   const resized = new Set<RoomId>();
+  let addedOpeningIndex = 0;
+
+  /** "the kitchen/hall wall" or "the living room's north wall" — how a person locates an opening. */
+  const describeOpening = (openingId: string): string => {
+    const opening = after.openings.find((o) => o.id === openingId);
+    if (!opening) return "wall";
+    if (opening.anchor.kind === "between") {
+      return `between ${nameOf(opening.anchor.rooms[0])} and ${nameOf(opening.anchor.rooms[1])}`;
+    }
+    return `on the ${opening.anchor.side} wall of ${nameOf(opening.anchor.roomId)}`;
+  };
   // addRoom ops consume allocated ids in order — the op's own roomId is often absent
   // (or, from a provider, a duplicate the reducer replaced), so it can't name the room.
   let addedIndex = 0;
@@ -376,6 +460,27 @@ function summarizeChanges(
       case "setDimensionRange":
         changes.push(`${nameOf(op.roomId)} ${op.dimensionType} constrained`);
         break;
+      case "addOpening": {
+        const id = after.addedOpeningIds[addedOpeningIndex++];
+        changes.push(id ? `Added ${op.kind} ${describeOpening(id)}` : `Added ${op.kind}`);
+        break;
+      }
+      case "removeOpening":
+        changes.push("Removed an opening");
+        break;
+      case "moveOpening":
+        changes.push(`Moved ${describeOpening(op.openingId)}`);
+        break;
+      case "setOpeningSwing":
+        changes.push(`Door swing set to ${op.swing}`);
+        break;
+      case "setSplit":
+        changes.push("Moved a wall");
+        break;
+      case "setLabelAnchor":
+        // A label position is a rendering nicety; announcing it would only add noise
+        // to the transcript beside the edits that changed the plan itself.
+        break;
     }
   }
 
@@ -402,7 +507,7 @@ export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
   for (const [id, r] of Object.entries(level.graph.rooms)) namesBefore[id] = r.name;
 
   const state = levelStateFromDoc(doc, level);
-  const { openingOps, errors, addedRoomIds } = applyTreeOps(state, patch.ops, beforeAreas);
+  const { errors, addedRoomIds, addedOpeningIds } = applyTreeOps(state, patch.ops, beforeAreas);
   if (errors.length > 0) return { ok: false, errors };
 
   let graph: WallGraph;
@@ -415,13 +520,14 @@ export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
     if (!solved.ok) return { ok: false, errors: [], violations: solved.violations };
     afterLeaves = solved.leaves;
     graph = buildWallGraph(solved.leaves, state.boundary, state.roomMeta);
-    applyOpeningOps(graph, openingOps);
+    applyOpeningsToGraph(graph, state.openings);
   }
 
   const newLevel: Level = {
     ...level,
     boundary: state.boundary,
     generator: state.tree ? { tree: state.tree } : undefined,
+    openings: state.openings,
     graph,
   };
 
@@ -437,7 +543,11 @@ export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
 
   const nameOf = (roomId: RoomId) => graph.rooms[roomId]?.name ?? namesBefore[roomId] ?? roomId;
   const afterAreas = leafAreas(afterLeaves);
-  const changes = summarizeChanges(patch.ops, beforeAreas, afterAreas, nameOf, addedRoomIds);
+  const changes = summarizeChanges(patch.ops, beforeAreas, afterAreas, nameOf, addedRoomIds, {
+    graph,
+    openings: state.openings,
+    addedOpeningIds,
+  });
 
   return { ok: true, doc: newDoc, changes };
 }

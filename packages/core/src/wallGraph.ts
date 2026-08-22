@@ -2,7 +2,7 @@
 // planar WallGraph (DM-1, DM-5): shared centerlines with thickness, rooms referencing
 // ordered boundary edge cycles. Face polygons are derived at render time, never stored.
 
-import type { EdgeId, NodeId, Room, RoomId, WallEdge, WallGraph } from "./types.js";
+import type { EdgeId, NodeId, Opening, Room, RoomId, WallEdge, WallGraph } from "./types.js";
 export type Point = { x: number; y: number };
 import type { LeafRect } from "./slicingSolver.js";
 
@@ -198,7 +198,7 @@ export function buildWallGraph(
       name: meta?.name ?? r.roomId,
       program: meta?.program ?? "other",
       boundary: [...top, ...right, ...bottom, ...left],
-      labelAnchor: meta?.labelAnchor ?? { x: r.x + r.w / 2, y: r.y + r.d / 2 },
+      labelAnchor: labelAnchorWithin(r, meta?.labelAnchor),
       constraints: meta?.constraints,
     };
   }
@@ -206,8 +206,141 @@ export function buildWallGraph(
   return { nodes: nodes.all, edges, rooms };
 }
 
+/**
+ * A dragged label (FR-7) is stored in absolute mm, so a later layout change can leave it
+ * outside its own room. Rather than persist a position that renders somewhere confusing,
+ * an out-of-room anchor falls back to the room's centre.
+ */
+const LABEL_INSET_MM = 150;
+
+function labelAnchorWithin(rect: LeafRect, anchor: Point | undefined): Point {
+  const centre = { x: rect.x + rect.w / 2, y: rect.y + rect.d / 2 };
+  if (!anchor) return centre;
+  const inset = Math.min(LABEL_INSET_MM, rect.w / 2, rect.d / 2);
+  const inside =
+    anchor.x >= rect.x + inset &&
+    anchor.x <= rect.x + rect.w - inset &&
+    anchor.y >= rect.y + inset &&
+    anchor.y <= rect.y + rect.d - inset;
+  return inside ? anchor : centre;
+}
+
 export function roomRect(leaves: LeafRect[], roomId: RoomId): LeafRect | undefined {
   return leaves.find((l) => l.roomId === roomId);
+}
+
+/**
+ * A maximal run of collinear, end-to-end connected wall edges. The graph splits walls at
+ * every T-junction, so a single visual wall is usually several edges; FR-8's "dimension
+ * string on every wall run" means one string per run, not one per edge.
+ */
+export type WallRun = {
+  axis: "h" | "v";
+  /** y for a horizontal run, x for a vertical one. */
+  coord: number;
+  /** Extent along the run's own axis. */
+  from: number;
+  to: number;
+  edgeIds: EdgeId[];
+  type: WallEdge["type"];
+};
+
+export function wallRuns(graph: WallGraph): WallRun[] {
+  type Segment = { start: number; end: number; edgeId: EdgeId; type: WallEdge["type"] };
+  const groups = new Map<string, Segment[]>();
+
+  for (const [edgeId, edge] of Object.entries(graph.edges)) {
+    const a = graph.nodes[edge.a];
+    const b = graph.nodes[edge.b];
+    if (!a || !b) continue;
+    const vertical = a.x === b.x;
+    const horizontal = a.y === b.y;
+    if (!vertical && !horizontal) continue; // Phase 2 geometry is axis-aligned throughout.
+    const axis: "h" | "v" = vertical ? "v" : "h";
+    const coord = vertical ? a.x : a.y;
+    const start = vertical ? Math.min(a.y, b.y) : Math.min(a.x, b.x);
+    const end = vertical ? Math.max(a.y, b.y) : Math.max(a.x, b.x);
+    const key = `${axis}:${coord}:${edge.type}`;
+    const arr = groups.get(key) ?? [];
+    arr.push({ start, end, edgeId, type: edge.type });
+    groups.set(key, arr);
+  }
+
+  const runs: WallRun[] = [];
+  for (const [key, segments] of groups) {
+    const [axis, coordStr] = key.split(":") as ["h" | "v", string];
+    segments.sort((p, q) => p.start - q.start);
+    let current: WallRun | null = null;
+    for (const seg of segments) {
+      if (current && seg.start <= current.to) {
+        current.to = Math.max(current.to, seg.end);
+        current.edgeIds.push(seg.edgeId);
+        continue;
+      }
+      if (current) runs.push(current);
+      current = { axis, coord: Number(coordStr), from: seg.start, to: seg.end, edgeIds: [seg.edgeId], type: seg.type };
+    }
+    if (current) runs.push(current);
+  }
+  return runs;
+}
+
+export type Span = { from: number; to: number };
+
+/**
+ * Where each opening on this run sits along the run's own axis, in absolute level
+ * coordinates. An opening's `offset` is measured from its edge's `a` node, which is not
+ * necessarily the low end of the run, so direction has to be resolved per edge.
+ */
+export function openingSpansOnRun(graph: WallGraph, run: WallRun): Array<{ span: Span; opening: Opening }> {
+  const out: Array<{ span: Span; opening: Opening }> = [];
+  for (const edgeId of run.edgeIds) {
+    const edge = graph.edges[edgeId];
+    if (!edge) continue;
+    const a = graph.nodes[edge.a];
+    const b = graph.nodes[edge.b];
+    if (!a || !b) continue;
+    const fromA = run.axis === "v" ? a.y : a.x;
+    const toB = run.axis === "v" ? b.y : b.x;
+    const forward = toB >= fromA;
+    for (const opening of edge.openings) {
+      const start = forward ? fromA + opening.offset : fromA - opening.offset - opening.width;
+      out.push({ span: { from: start, to: start + opening.width }, opening });
+    }
+  }
+  return out.sort((p, q) => p.span.from - q.span.from);
+}
+
+/** The pieces of [from,to] left after removing `holes`, in order. */
+export function subtractSpans(from: number, to: number, holes: readonly Span[]): Span[] {
+  const pieces: Span[] = [];
+  let cursor = from;
+  for (const hole of holes) {
+    if (hole.to <= cursor) continue;
+    if (hole.from > cursor) pieces.push({ from: cursor, to: Math.min(hole.from, to) });
+    cursor = Math.max(cursor, hole.to);
+    if (cursor >= to) break;
+  }
+  if (cursor < to) pieces.push({ from: cursor, to });
+  return pieces.filter((p) => p.to - p.from > 0.5);
+}
+
+/**
+ * Wall runs resolved into drawable solids: the stretches of wall that are actually built,
+ * with the openings knocked out. Shared by every exporter that draws walls with thickness
+ * rather than as centerlines (ARC-2 — one implementation, several outputs).
+ */
+export function wallRunSolids(graph: WallGraph): Array<{ run: WallRun; thickness: number; solids: Span[]; holes: Span[] }> {
+  return wallRuns(graph).map((run) => {
+    const thickness = graph.edges[run.edgeIds[0]!]?.thickness ?? INTERIOR_WALL_THICKNESS_MM;
+    const holes = openingSpansOnRun(graph, run).map((o) => o.span);
+    // Exterior runs are extended half a thickness at each end so the building's corners
+    // close; interior runs stop at their nodes and are closed by whatever they meet.
+    const extend = run.type === "exterior" ? thickness / 2 : 0;
+    const from = run.from - extend;
+    const to = run.to + extend;
+    return { run, thickness, solids: subtractSpans(from, to, holes), holes };
+  });
 }
 
 /**

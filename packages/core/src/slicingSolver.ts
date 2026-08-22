@@ -10,8 +10,25 @@ export type Rect = { x: number; y: number; w: number; d: number };
 
 export type LeafRect = Rect & { roomId: RoomId; path: NodePath };
 
+/**
+ * An internal split's realised cut line. Dragging a wall in the canvas is an edit to
+ * exactly one of these (SLV-5), so the solver reports where each landed and how far it
+ * can travel before a child room falls under its minimum.
+ */
+export type CutLine = {
+  path: NodePath;
+  axis: "h" | "v";
+  /** x for a vertical cut, y for a horizontal one, in level-local mm. */
+  position: number;
+  /** The rectangle this split subdivides. */
+  rect: Rect;
+  /** Range `position` may take without violating either child's minimum size. */
+  min: number;
+  max: number;
+};
+
 export type SlicingSolveResult =
-  | { ok: true; leaves: LeafRect[] }
+  | { ok: true; leaves: LeafRect[]; cuts: CutLine[] }
   | { ok: false; violations: SolveViolation[] };
 
 type MinSize = { w: number; d: number };
@@ -61,7 +78,14 @@ function collectRoomIds(node: SlicingTree, out: RoomId[]): void {
 }
 
 /** Assigns rectangles top-down, snapping each internal cut line to the grid module while keeping every leaf >= its min size. */
-function snapCutLines(node: SlicingTree, rect: Rect, grid: number, path: NodePath, out: LeafRect[]): void {
+function snapCutLines(
+  node: SlicingTree,
+  rect: Rect,
+  grid: number,
+  path: NodePath,
+  out: LeafRect[],
+  cuts: CutLine[],
+): void {
   if (node.kind === "leaf") {
     out.push({ ...rect, roomId: node.roomId, path });
     return;
@@ -76,8 +100,9 @@ function snapCutLines(node: SlicingTree, rect: Rect, grid: number, path: NodePat
     const raw = Math.min(Math.max(ideal, lo), hi);
     const w0 = snapWithinRange(raw, lo, hi, grid);
     const w1 = rect.w - w0;
-    snapCutLines(c0, { x: rect.x, y: rect.y, w: w0, d: rect.d }, grid, [...path, 0], out);
-    snapCutLines(c1, { x: rect.x + w0, y: rect.y, w: w1, d: rect.d }, grid, [...path, 1], out);
+    cuts.push({ path, axis: "v", position: rect.x + w0, rect, min: rect.x + lo, max: rect.x + hi });
+    snapCutLines(c0, { x: rect.x, y: rect.y, w: w0, d: rect.d }, grid, [...path, 0], out, cuts);
+    snapCutLines(c1, { x: rect.x + w0, y: rect.y, w: w1, d: rect.d }, grid, [...path, 1], out, cuts);
   } else {
     const lo = m0.d;
     const hi = rect.d - m1.d;
@@ -85,8 +110,9 @@ function snapCutLines(node: SlicingTree, rect: Rect, grid: number, path: NodePat
     const raw = Math.min(Math.max(ideal, lo), hi);
     const d0 = snapWithinRange(raw, lo, hi, grid);
     const d1 = rect.d - d0;
-    snapCutLines(c0, { x: rect.x, y: rect.y, w: rect.w, d: d0 }, grid, [...path, 0], out);
-    snapCutLines(c1, { x: rect.x, y: rect.y + d0, w: rect.w, d: d1 }, grid, [...path, 1], out);
+    cuts.push({ path, axis: "h", position: rect.y + d0, rect, min: rect.y + lo, max: rect.y + hi });
+    snapCutLines(c0, { x: rect.x, y: rect.y, w: rect.w, d: d0 }, grid, [...path, 0], out, cuts);
+    snapCutLines(c1, { x: rect.x, y: rect.y + d0, w: rect.w, d: d1 }, grid, [...path, 1], out, cuts);
   }
 }
 
@@ -116,7 +142,8 @@ export function solveSlicingTree(
 
   const rootRect: Rect = { x: 0, y: 0, w: boundary.widthMm, d: boundary.depthMm };
   const leaves: LeafRect[] = [];
-  snapCutLines(tree, rootRect, gridModule, [], leaves);
+  const cuts: CutLine[] = [];
+  snapCutLines(tree, rootRect, gridModule, [], leaves, cuts);
 
   const violations: SolveViolation[] = [];
   for (const leaf of leaves) {
@@ -130,7 +157,13 @@ export function solveSlicingTree(
   }
   if (violations.length > 0) return { ok: false, violations };
 
-  return { ok: true, leaves };
+  return { ok: true, leaves, cuts };
+}
+
+/** Smallest boundary that can hold this tree — the floor for an outer-boundary resize drag. */
+export function treeMinimumSize(tree: SlicingTree): { widthMm: number; depthMm: number } {
+  const m = computeMin(tree);
+  return { widthMm: m.w, depthMm: m.d };
 }
 
 export function defaultMinFor(program: keyof typeof ROOM_PROGRAM_MIN_DIMENSIONS): { minWidth: number; minDepth: number } {
