@@ -63,12 +63,12 @@ const UNIT_WORDS: Record<string, ParsedUnit> = {
 };
 
 // Longest alternatives first so "mm" is never read as "m" with a stray letter left over.
-const UNIT_PATTERN =
+export const UNIT_PATTERN =
   "(?:ft|foot|feet|'|inches|inch|in|\"|millimet(?:er|re)s?|mm|centimet(?:er|re)s?|cm|met(?:er|re)s?|m)";
-const NUMBER = "\\d+(?:\\.\\d+)?";
-const CROSS = "(?:x|×|by)";
+export const NUMBER = "\\d+(?:\\.\\d+)?";
+export const CROSS = "(?:x|×|by)";
 
-function toMm(value: number, unit: ParsedUnit): number {
+export function toMm(value: number, unit: ParsedUnit): number {
   switch (unit) {
     case "ft":
       return Math.round(value * MM_PER_FOOT);
@@ -89,7 +89,7 @@ function normalizeUnit(word: string | undefined): ParsedUnit | null {
 }
 
 /** DIM-3: an explicit unit always wins; otherwise the plan's own unit system is assumed. */
-function unitFor(explicit: string | undefined, units: Units): { unit: ParsedUnit; assumed: boolean } {
+export function unitFor(explicit: string | undefined, units: Units): { unit: ParsedUnit; assumed: boolean } {
   const parsed = normalizeUnit(explicit);
   if (parsed) return { unit: parsed, assumed: false };
   return { unit: units === "metric" ? "m" : "ft", assumed: true };
@@ -121,24 +121,46 @@ function findRoom(index: ReturnType<typeof roomIndex>, text: string): { roomId: 
 type Clause = { text: string; start: number; end: number };
 
 /**
- * Splits an utterance into clauses on commas and "and". Each is matched independently so
- * "bathroom 5x8, kitchen 8x12 feet" produces two constraints (DIM-2) and an unrelated
- * clause like "add a pantry" survives into the remainder untouched.
+ * A clause asking for a room to be created. Creation is the intent matcher's job (or the
+ * provider's), including any dimensions it carries: "add a closet 3x4 ft" must build a
+ * new closet, and letting a dimension matcher have it first would instead re-pin an
+ * existing room that happened to be called Closet.
+ */
+const CREATION_CLAUSE = /^\s*(?:please\s+)?(?:add|create|insert|put|make\s+(?:me\s+)?(?:a|an)\b)/i;
+
+/**
+ * Splits an utterance into clauses on commas, semicolons and "and", keeping each one's
+ * exact span in the original string so the unmatched remainder can be reconstructed
+ * verbatim rather than re-joined with invented punctuation.
  */
 function clauses(utterance: string): Clause[] {
   const out: Clause[] = [];
-  const pattern = /[^,;]+/g;
+  const separator = /\s*(?:,|;|\band\b)\s*/gi;
+  let cursor = 0;
   let match: RegExpExecArray | null;
-  while ((match = pattern.exec(utterance))) {
-    const chunk = match[0]!;
-    // "and" only splits when it separates two statements, not inside a room name.
-    let offset = 0;
-    for (const part of chunk.split(/\band\b/i)) {
-      out.push({ text: part, start: match.index + offset, end: match.index + offset + part.length });
-      offset += part.length + 3;
-    }
+  while ((match = separator.exec(utterance))) {
+    out.push({ text: utterance.slice(cursor, match.index), start: cursor, end: match.index });
+    cursor = match.index + match[0]!.length;
   }
+  out.push({ text: utterance.slice(cursor), start: cursor, end: utterance.length });
   return out.filter((c) => c.text.trim().length > 0);
+}
+
+/** Rebuilds the utterance with the consumed spans cut out, then tidies dangling separators. */
+function remainderAfter(utterance: string, consumed: Array<{ start: number; end: number }>): string {
+  const ordered = [...consumed].sort((a, b) => a.start - b.start);
+  let out = "";
+  let cursor = 0;
+  for (const span of ordered) {
+    if (span.start > cursor) out += utterance.slice(cursor, span.start);
+    cursor = Math.max(cursor, span.end);
+  }
+  out += utterance.slice(cursor);
+  return out
+    .replace(/\s+/g, " ")
+    .replace(/^(?:\s|,|;|\band\b)+/i, "")
+    .replace(/(?:\s|,|;|\band\b)+$/i, "")
+    .trim();
 }
 
 type Matcher = (clause: Clause, context: Context) => { ops: PatchOp[]; applied: string[] } | null;
@@ -275,12 +297,14 @@ const matchSingleAxis: Matcher = (clause, ctx) => {
 };
 
 /**
- * "increase the bedroom depth by 2 meters" — relative, so the current geometry has to be
- * measured first and the result pinned as an absolute value.
+ * "increase the bedroom depth by 2 meters", "increase office length by 30%" — relative,
+ * so the current geometry is measured first and the result pinned as an absolute value.
+ * A percentage scales the current dimension; a length adds to it.
  */
 const matchRelative: Matcher = (clause, ctx) => {
   const pattern = new RegExp(
-    `^(?:please\\s+)?(increase|decrease|reduce|grow|shrink)\\s+(?:the\\s+)?(.*?)\\s*(?:'s)?\\s*(width|depth)\\s*(?:by)\\s*(${NUMBER})\\s*(${UNIT_PATTERN})?\\s*$`,
+    `^(?:please\\s+)?(increase|decrease|reduce|grow|shrink|expand)\\s+(?:the\\s+)?(.*?)\\s*(?:'s)?\\s*` +
+      `(width|depth|length|long)\\s*(?:by)\\s*(${NUMBER})\\s*(%|percent|${UNIT_PATTERN})?\\s*$`,
     "i",
   );
   const m = pattern.exec(clause.text.trim());
@@ -290,12 +314,23 @@ const matchRelative: Matcher = (clause, ctx) => {
 
   const rect = roomRectOf(ctx.doc, room.roomId);
   if (!rect) return null;
-  const unit = unitFor(m[5], ctx.doc.units);
-  warnIfAssumed(ctx, clause, unit.assumed);
-  const delta = toMm(Number(m[4]), unit.unit) * (/decrease|reduce|shrink/i.test(m[1]!) ? -1 : 1);
-  const axis = m[3]!.toLowerCase() as "width" | "depth";
+  // "length" and "long" describe the front-to-back extent, matching how matchSingleAxis
+  // already reads "deep"/"long".
+  const axis: "width" | "depth" = /^width$/i.test(m[3]!) ? "width" : "depth";
   const current = axis === "width" ? rect.w : rect.d;
-  const target = Math.max(Math.round(current + delta), 1);
+  const shrinking = /decrease|reduce|shrink/i.test(m[1]!);
+  const amount = Number(m[4]);
+  const suffix = m[5];
+
+  let target: number;
+  if (suffix && /^(%|percent)$/i.test(suffix)) {
+    target = Math.round(current * (1 + (shrinking ? -1 : 1) * (amount / 100)));
+  } else {
+    const unit = unitFor(suffix, ctx.doc.units);
+    warnIfAssumed(ctx, clause, unit.assumed);
+    target = Math.round(current + toMm(amount, unit.unit) * (shrinking ? -1 : 1));
+  }
+  target = Math.max(target, 1);
 
   return {
     ops: [{ op: "setDimension", roomId: room.roomId, dimensionType: axis, value: target }],
@@ -330,24 +365,23 @@ export function parseDimensions(doc: PlanDocument, utterance: string): Dimension
   const ctx: Context = { doc, rooms: roomIndex(doc), warnings: [] };
   const ops: PatchOp[] = [];
   const applied: string[] = [];
-  const leftover: string[] = [];
+  const consumed: Array<{ start: number; end: number }> = [];
 
   for (const clause of clauses(utterance)) {
-    let matched = false;
+    if (CREATION_CLAUSE.test(clause.text)) continue;
     for (const matcher of MATCHERS) {
       const result = matcher(clause, ctx);
       if (!result) continue;
       ops.push(...result.ops);
       applied.push(...result.applied);
-      matched = true;
+      consumed.push({ start: clause.start, end: clause.end });
       break;
     }
-    // DIM-4: an unparseable fragment does not stop the parsed ones from applying; it
-    // travels on to the provider instead.
-    if (!matched) leftover.push(clause.text.trim());
+    // DIM-4: an unmatched fragment does not stop the parsed ones from applying; it is
+    // simply left in the remainder and travels on to the provider.
   }
 
-  return { ops, applied, remainder: leftover.join(", ").trim(), warnings: ctx.warnings };
+  return { ops, applied, remainder: remainderAfter(utterance, consumed), warnings: ctx.warnings };
 }
 
 export type ImpossibleConstraint = { roomIds: RoomId[]; message: string };

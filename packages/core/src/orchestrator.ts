@@ -22,6 +22,11 @@ export type TurnOutcome =
   | { kind: "undo" }
   | { kind: "redo" }
   | { kind: "provider"; doc: PlanDocument; changes: string[]; narration?: string; providerId: string; warnings?: DimensionWarning[] }
+  /**
+   * The request was understood in shape but not in target — which room, or what kind of
+   * room. The plan is untouched and the user is asked exactly one question (FR-5).
+   */
+  | { kind: "clarify"; question: string; options?: string[]; doc?: PlanDocument; changes?: string[] }
   | { kind: "error"; message: string };
 
 function describeApplyFailure(result: { ok: false; errors: string[]; violations?: { message: string }[] }): string {
@@ -66,6 +71,18 @@ export async function resolveTurn(
   if (intent) {
     if (intent.kind === "undo") return { kind: "undo" };
     if (intent.kind === "redo") return { kind: "redo" };
+    if (intent.kind === "clarify") {
+      // Deliberately not handed to the provider: the deterministic layer already
+      // understood the request well enough to know it is ambiguous, and a model asked
+      // the same question would answer it by picking one — the guess we are avoiding.
+      // Dimensions parsed earlier in the turn still stand and are returned with it.
+      return {
+        kind: "clarify",
+        question: intent.question,
+        options: intent.options,
+        ...(dimensions.ops.length > 0 ? { doc: workingDoc, changes: dimensionChanges } : {}),
+      };
+    }
     const result = applyPatch(workingDoc, intent.patch);
     if (result.ok) return { kind: "deterministic", doc: result.doc, changes: [...dimensionChanges, ...result.changes], warnings };
     return { kind: "error", message: describeApplyFailure(result) };
