@@ -147,6 +147,14 @@ Cloudflare account and to be logged in via `npx wrangler login` from
    which bundles the Worker (including the `@floorcraft/core` workspace
    package) and uploads the built assets via the `[assets]` binding.
 
+   `wrangler.toml` pins `account_id` for this reason: without it, `wrangler
+   deploy` resolves the account by calling the legacy `/memberships` API,
+   which 400s (code 9106) for scoped API tokens that lack the old
+   membership-read grant — even though the same token deploys fine once the
+   account is already known. If you fork this and deploy under a different
+   account, update `account_id` to your own (`npx wrangler whoami` prints
+   it).
+
 6. Optional: adjust `[vars]` in `wrangler.toml` — `DAILY_QUOTA_PER_CLIENT`
    (default 12 turns/client/day, T1-3) and `GLOBAL_NEURON_BUDGET` (default
    7,000 = 70% of the 10,000/day free allocation, T1-4).
