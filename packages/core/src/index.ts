@@ -8,6 +8,8 @@ export * from "./patch.js";
 export * from "./planSummary.js";
 export * from "./svgRenderer.js";
 export * from "./jsonExport.js";
+export * from "./dxfExport.js";
+export * from "./pdfExport.js";
 export * from "./intentMatcher.js";
 export * from "./dimensionParser.js";
 export * from "./orchestrator.js";
