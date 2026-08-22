@@ -14,10 +14,27 @@
  * An empty change list is the exception, always worth stating: the patch applied but
  * moved nothing the user can see, and a narration claiming otherwise would be the only
  * thing they'd read.
+ *
+ * Dimension warnings (DIM-3, where a unit had to be assumed) are appended rather than
+ * substituted: the user needs to see both what changed and what was guessed on their
+ * behalf, and a guessed unit is exactly the thing they would want to correct.
  */
-export function formatAppliedTurn(input: { changes: readonly string[]; narration?: string }): string {
+export function formatAppliedTurn(input: {
+  changes: readonly string[];
+  narration?: string;
+  warnings?: readonly { message: string }[];
+}): string {
   const narration = input.narration?.trim();
   const changeSummary = input.changes.join(", ");
-  if (!changeSummary) return narration ? `${narration} (No visible changes.)` : "No visible changes.";
-  return narration || changeSummary;
+  const body = !changeSummary
+    ? narration
+      ? `${narration} (No visible changes.)`
+      : "No visible changes."
+    : narration || changeSummary;
+
+  const warnings = (input.warnings ?? []).map((w) => w.message);
+  if (warnings.length === 0) return body;
+  return `${body}
+
+${[...new Set(warnings)].join(" ")}`;
 }

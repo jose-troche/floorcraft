@@ -1,20 +1,27 @@
-// Turn orchestration — specs.md §5.1 (INF-4, INF-5) and §5.4 (RTE-3/RTE-4).
-// Tries the deterministic intent matcher first; only calls a provider when no
-// deterministic match exists. Validates every provider patch against the schema
-// and solver preconditions, with exactly one automatic repair retry (INF-4).
+// Turn orchestration — specs.md §5.5 (DIM-1/DIM-4/DIM-5), §5.1 (INF-4, INF-5) and
+// §5.4 (RTE-3/RTE-4).
+//
+// The order of the three layers is normative, not incidental:
+//   1. Dimension parsing (DIM-5). Stated dimensions are facts; they are applied before
+//      anything else and never sent to a model to be re-derived.
+//   2. The deterministic intent matcher (INF-5) on whatever text is left.
+//   3. A provider, asked only about the remainder (DIM-4).
+// So "make the kitchen 5x6 feet and add a pantry" pins the kitchen deterministically and
+// asks the model only to place the pantry.
 
 import { applyPatch } from "./patch.js";
 import { matchDeterministicIntent } from "./intentMatcher.js";
 import { buildPlanSummary } from "./planSummary.js";
+import { checkConstraintsPossible, parseDimensions, type DimensionWarning } from "./dimensionParser.js";
 import type { PlanDocument, Turn } from "./types.js";
 import type { PlanProvider } from "./providers/types.js";
 import { CORE_PATCH_OPS, FULL_PATCH_OPS, validatePatchResponse } from "./providers/schema.js";
 
 export type TurnOutcome =
-  | { kind: "deterministic"; doc: PlanDocument; changes: string[] }
+  | { kind: "deterministic"; doc: PlanDocument; changes: string[]; warnings?: DimensionWarning[] }
   | { kind: "undo" }
   | { kind: "redo" }
-  | { kind: "provider"; doc: PlanDocument; changes: string[]; narration?: string; providerId: string }
+  | { kind: "provider"; doc: PlanDocument; changes: string[]; narration?: string; providerId: string; warnings?: DimensionWarning[] }
   | { kind: "error"; message: string };
 
 function describeApplyFailure(result: { ok: false; errors: string[]; violations?: { message: string }[] }): string {
@@ -24,20 +31,57 @@ function describeApplyFailure(result: { ok: false; errors: string[]; violations?
 
 export async function resolveTurn(
   doc: PlanDocument,
-  utterance: string,
+  utteranceRaw: string,
   history: Turn[],
   provider: PlanProvider | null,
 ): Promise<TurnOutcome> {
-  const intent = matchDeterministicIntent(doc, utterance);
+  // Undo and redo are checked first: they are commands about the session, not edits, and
+  // must not be pulled apart by the dimension parser.
+  const command = matchDeterministicIntent(doc, utteranceRaw);
+  if (command?.kind === "undo") return { kind: "undo" };
+  if (command?.kind === "redo") return { kind: "redo" };
+
+  const dimensions = parseDimensions(doc, utteranceRaw);
+  const dimensionChanges: string[] = [];
+  const warnings = dimensions.warnings;
+  let workingDoc = doc;
+
+  if (dimensions.ops.length > 0) {
+    const impossible = checkConstraintsPossible(doc, dimensions.ops);
+    if (impossible) return { kind: "error", message: impossible.message };
+    const applied = applyPatch(doc, { ops: dimensions.ops, source: "deterministic" });
+    if (!applied.ok) return { kind: "error", message: describeApplyFailure(applied) };
+    workingDoc = applied.doc;
+    dimensionChanges.push(...applied.changes);
+  }
+
+  const utterance = dimensions.ops.length > 0 ? dimensions.remainder : utteranceRaw;
+
+  // Nothing left to do beyond the dimensions themselves.
+  if (dimensions.ops.length > 0 && utterance.length === 0) {
+    return { kind: "deterministic", doc: workingDoc, changes: dimensionChanges, warnings };
+  }
+
+  const intent = matchDeterministicIntent(workingDoc, utterance);
   if (intent) {
     if (intent.kind === "undo") return { kind: "undo" };
     if (intent.kind === "redo") return { kind: "redo" };
-    const result = applyPatch(doc, intent.patch);
-    if (result.ok) return { kind: "deterministic", doc: result.doc, changes: result.changes };
+    const result = applyPatch(workingDoc, intent.patch);
+    if (result.ok) return { kind: "deterministic", doc: result.doc, changes: [...dimensionChanges, ...result.changes], warnings };
     return { kind: "error", message: describeApplyFailure(result) };
   }
 
   if (!provider) {
+    // Dimensions that were already applied stand on their own — the turn is only a
+    // failure for the part no deterministic layer could handle.
+    if (dimensions.ops.length > 0) {
+      return {
+        kind: "deterministic",
+        doc: workingDoc,
+        changes: [...dimensionChanges, `Could not act on "${utterance}" without an AI tier — the dimensions above were applied.`],
+        warnings,
+      };
+    }
     return {
       kind: "error",
       message:
@@ -45,7 +89,8 @@ export async function resolveTurn(
     };
   }
 
-  const summary = buildPlanSummary(doc);
+  const doc_ = workingDoc;
+  const summary = buildPlanSummary(doc_);
 
   const attempt = async (note?: string) => {
     const effectiveUtterance = note ? `${utterance}\n\n[${note}]` : utterance;
@@ -62,7 +107,7 @@ export async function resolveTurn(
     const allowed = provider.tier === 0 ? CORE_PATCH_OPS : FULL_PATCH_OPS;
     const parsed = validatePatchResponse(raw, allowed);
     if (!parsed.ok) return { ok: false as const, failure: "validation" as const, error: parsed.error };
-    const applied = applyPatch(doc, parsed.patch);
+    const applied = applyPatch(doc_, parsed.patch);
     if (!applied.ok) return { ok: false as const, failure: "validation" as const, error: describeApplyFailure(applied) };
     return { ok: true as const, patch: parsed.patch, doc: applied.doc, changes: applied.changes };
   };
@@ -84,5 +129,12 @@ export async function resolveTurn(
     return { kind: "error", message };
   }
 
-  return { kind: "provider", doc: result.doc, changes: result.changes, narration: result.patch.narration, providerId: provider.id };
+  return {
+    kind: "provider",
+    doc: result.doc,
+    changes: [...dimensionChanges, ...result.changes],
+    narration: result.patch.narration,
+    providerId: provider.id,
+    warnings,
+  };
 }

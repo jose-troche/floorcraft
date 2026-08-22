@@ -33,4 +33,21 @@ describe("applied-turn wording", () => {
   it("reports an empty, unnarrated turn plainly", () => {
     expect(formatAppliedTurn({ changes: [] })).toBe("No visible changes.");
   });
+
+  it("appends a dimension warning without replacing what changed (DIM-3)", () => {
+    const text = formatAppliedTurn({
+      changes: ["Kitchen width pinned to 4.0 ft"],
+      warnings: [{ message: "No unit given — read as feet to match the plan." }],
+    });
+    expect(text).toContain("Kitchen width pinned");
+    expect(text).toContain("read as feet");
+  });
+
+  it("states a repeated warning once", () => {
+    const text = formatAppliedTurn({
+      changes: ["Kitchen pinned"],
+      warnings: [{ message: "No unit given." }, { message: "No unit given." }],
+    });
+    expect(text.match(/No unit given/g)).toHaveLength(1);
+  });
 });
