@@ -268,16 +268,26 @@ main.layout {
 
 .chat-input-row {
   display: flex;
+  align-items: flex-end;
   gap: 0.5rem;
   padding-top: 0.5rem;
   border-top: 1px solid var(--border);
 }
-.chat-input-row input {
+.chat-input-row textarea {
   flex: 1;
   padding: 0.5rem;
   border: 1px solid var(--border);
   border-radius: 0.4rem;
   background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  line-height: 1.4;
+  /* rows=3 sets the starting height; resize lets a longer message grow, capped so it
+     never crowds out the rest of a small mobile screen — past the cap it scrolls like
+     any textarea (touch-scrollable on mobile without extra wiring). */
+  resize: vertical;
+  max-height: 40vh;
+  overflow-y: auto;
 }
 .chat-disabled-note {
   font-size: 0.8rem;

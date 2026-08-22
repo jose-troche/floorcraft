@@ -444,8 +444,8 @@ export class AppUI {
     wrap.style.minHeight = "0";
 
     // Declared before the transcript so a clarification chip can write into it.
-    const input = document.createElement("input");
-    input.type = "text";
+    const input = document.createElement("textarea");
+    input.rows = 3;
 
     const messages = document.createElement("div");
     messages.className = "chat-messages";
@@ -534,7 +534,12 @@ export class AppUI {
     };
 
     input.onkeydown = (e) => {
-      if (e.key === "Enter") void submit();
+      // Shift+Enter (or IME composition) inserts a newline like any multiline textarea;
+      // plain Enter sends, matching the single-line input's old behavior.
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        void submit();
+      }
     };
     send.onclick = () => void submit();
 
