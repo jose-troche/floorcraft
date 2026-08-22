@@ -93,6 +93,20 @@ export class PlanStore {
       // IndexedDB documents don't go through importJson's migration pass — normalize
       // here so a document written before Phase 3's Generator shape change still loads.
       if (record) record = { ...record, doc: normalizeDocument(record.doc) };
+      // Records written before chat history became per-level carry a flat `chatHistory`
+      // array instead of `chatHistoryByLevel`. Without this, PlanStore.chatHistory's
+      // lookup throws on load (chatHistoryByLevel is undefined), which was breaking the
+      // whole UI render — not just the chat panel, since a stored plan is the common case
+      // for a returning user. Fold the old array into the plan's active level so nothing
+      // is lost, and backfill every other level with an empty history.
+      if (record && !("chatHistoryByLevel" in record)) {
+        const legacy = (record as unknown as { chatHistory?: Turn[] }).chatHistory ?? [];
+        const chatHistoryByLevel: Record<string, Turn[]> = {};
+        for (const level of record.doc.levels) chatHistoryByLevel[level.id] = [];
+        chatHistoryByLevel[record.doc.activeLevelId] = legacy;
+        record = { ...record, chatHistoryByLevel };
+        delete (record as unknown as { chatHistory?: Turn[] }).chatHistory;
+      }
     }
     if (!record) {
       const id = crypto.randomUUID();
