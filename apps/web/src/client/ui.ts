@@ -44,6 +44,8 @@ export class AppUI {
   private pendingLabel: string | null = null;
   private paperSize: PaperSize = "A4";
   private shareLinks: { readOnly: string; edit: string } | null = null;
+  /** Options from the last clarifying question, offered as one-tap answers (FR-5). */
+  private clarifyOptions: string[] | null = null;
   /**
    * Built once and re-parented on every render. The canvas holds live gesture state and
    * a pan/zoom position; rebuilding it per render would drop a drag mid-flight.
@@ -221,6 +223,10 @@ export class AppUI {
     wrap.style.flex = "1";
     wrap.style.minHeight = "0";
 
+    // Declared before the transcript so a clarification chip can write into it.
+    const input = document.createElement("input");
+    input.type = "text";
+
     const messages = document.createElement("div");
     messages.className = "chat-messages";
     for (const turn of this.store.chatHistory) {
@@ -246,6 +252,22 @@ export class AppUI {
       messages.scrollTop = messages.scrollHeight;
     });
 
+    if (this.clarifyOptions && this.clarifyOptions.length > 0 && !this.chatBusy) {
+      const chips = document.createElement("div");
+      chips.className = "clarify-options";
+      for (const option of this.clarifyOptions) {
+        const chip = document.createElement("button");
+        chip.className = "clarify-chip";
+        chip.textContent = option;
+        chip.onclick = () => {
+          input.value = option;
+          input.focus();
+        };
+        chips.appendChild(chip);
+      }
+      wrap.appendChild(chips);
+    }
+
     const chatDisabled = providerState.activeId === null;
 
     if (chatDisabled) {
@@ -258,8 +280,6 @@ export class AppUI {
 
     const row = document.createElement("div");
     row.className = "chat-input-row";
-    const input = document.createElement("input");
-    input.type = "text";
     input.placeholder = chatDisabled ? "Chat disabled — use the manual editor" : "Describe your plan, or say things like \"swap the kitchen and bath\"";
     input.disabled = chatDisabled || this.chatBusy;
     const send = document.createElement("button");
@@ -272,6 +292,7 @@ export class AppUI {
     const submit = async () => {
       const text = input.value.trim();
       if (!text || this.chatBusy) return;
+      input.value = "";
       this.error = null;
       this.chatBusy = true;
       this.pendingLabel = tierLabel ? `Working on your plan with ${tierLabel}…` : "Working on your plan…";
@@ -279,6 +300,8 @@ export class AppUI {
       try {
         const result = await this.store.submitChatTurn(text);
         if (result.kind === "error") this.error = result.message;
+        // A question stays pending until the next turn answers it; anything else clears it.
+        this.clarifyOptions = result.kind === "clarify" ? (result.options ?? []) : null;
       } catch (e) {
         // The busy state must never outlive the turn: a stuck spinner tells the user
         // work is still happening when it has already failed.

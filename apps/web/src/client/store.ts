@@ -65,6 +65,8 @@ function idbPut(db: IDBDatabase, store: string, value: unknown): Promise<void> {
 export type TurnResult =
   | { kind: "applied"; changes: string[]; narration?: string }
   | { kind: "noop" }
+  /** The turn needs an answer before anything can be applied; the plan is untouched. */
+  | { kind: "clarify"; question: string; options?: string[] }
   | { kind: "error"; message: string };
 
 export class PlanStore {
@@ -237,6 +239,23 @@ export class PlanStore {
       await this.persist();
       this.emit();
       return { kind: "error", message: outcome.message };
+    }
+
+    if (outcome.kind === "clarify") {
+      // Anything the turn *did* resolve (parsed dimensions) still applies; only the
+      // ambiguous part is held back, so answering the question doesn't mean repeating
+      // the whole instruction.
+      if (outcome.doc) {
+        this.pushUndo(this.record.doc);
+        this.record.doc = outcome.doc;
+        this.sync?.schedule();
+      }
+      const applied = outcome.changes?.length ? `${outcome.changes.join(", ")}. ` : "";
+      const text = `${applied}${outcome.question}`;
+      this.record.chatHistory.push({ role: "assistant", text });
+      await this.persist();
+      this.emit();
+      return { kind: "clarify", question: outcome.question, options: outcome.options };
     }
 
     this.pushUndo(this.record.doc);

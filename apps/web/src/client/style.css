@@ -430,3 +430,24 @@ fieldset input, fieldset select {
   border-bottom: 1px solid var(--border);
   color: var(--muted);
 }
+
+/* Clarifying-question answers (FR-5), offered as one-tap chips above the input. */
+.clarify-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.5rem 0 0.25rem;
+}
+
+.clarify-chip {
+  font-size: 0.8rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 1rem;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  background: transparent;
+}
+.clarify-chip:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
