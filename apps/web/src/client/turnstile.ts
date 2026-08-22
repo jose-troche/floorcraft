@@ -57,6 +57,12 @@ export function getTurnstileToken(): Promise<string> {
   if (!window.turnstile || !widgetId) return Promise.reject(new Error("Turnstile not initialized"));
   return new Promise((resolve, reject) => {
     pending = { resolve, reject };
+    // Reset before every execution rather than reusing whatever state the widget was
+    // left in. Without this, a second execute() on an already-completed or errored
+    // widget can hand back a stale/duplicate token that the server-side siteverify call
+    // rejects — seen mostly on Safari, where ITP makes the widget more likely to land
+    // in that state after the first run.
+    window.turnstile!.reset(widgetId!);
     window.turnstile!.execute(widgetId!);
   });
 }

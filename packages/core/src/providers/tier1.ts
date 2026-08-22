@@ -33,13 +33,24 @@ export class Tier1Provider implements PlanProvider {
     const system = buildSystemPrompt(FULL_PATCH_OPS);
     const user = buildUserPrompt({ ...input, tokenBudget: TOKEN_BUDGET });
     const schema = buildPatchJsonSchema(FULL_PATCH_OPS);
-    const turnstileToken = await this.opts.getTurnstileToken();
 
-    const res = await fetchFn(this.opts.endpoint ?? "/api/infer", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ system, user, schema, turnstileToken }),
-    });
+    const send = async () => {
+      const turnstileToken = await this.opts.getTurnstileToken();
+      return fetchFn(this.opts.endpoint ?? "/api/infer", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ system, user, schema, turnstileToken }),
+      });
+    };
+
+    let res = await send();
+    // /api/infer's only 403 is a failed Turnstile siteverify. Tokens are single-use and
+    // Turnstile's own scoring is probabilistic (worse under Safari's ITP, which starves
+    // it of cross-site signal) — one retry with a fresh token clears most of these
+    // without surfacing a spurious "assistant unavailable" for what's really a retry.
+    if (res.status === 403) {
+      res = await send();
+    }
 
     if (res.status === 429) {
       const body = (await res.json().catch(() => ({}))) as { reason?: string };
