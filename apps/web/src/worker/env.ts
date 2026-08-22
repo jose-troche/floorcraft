@@ -15,4 +15,5 @@ export interface Env {
   GLOBAL_NEURON_BUDGET?: string;
   QUOTA_SALT?: string;
   TIER1_MODEL?: string;
+  CLOUD_SYNC_ENABLED?: string;
 }

@@ -1,5 +1,6 @@
 // Plan store — specs.md ARC-3 (client authoritative for session state), FR-12
-// (autosave to IndexedDB on every applied patch), FR-15 (last 50 patches for undo).
+// (autosave to IndexedDB on every applied patch), FR-13 (debounced sync to D1), FR-14
+// (share links), FR-15 (last 50 patches for undo).
 
 import {
   applyPatch,
@@ -12,6 +13,7 @@ import {
   type PlanProvider,
   type Turn,
 } from "@floorcraft/core";
+import { PlanSync, type CloudRef, type SyncStatus } from "./sync";
 
 const DB_NAME = "floorcraft";
 const DB_VERSION = 1;
@@ -25,6 +27,8 @@ type StoredRecord = {
   chatHistory: Turn[];
   undoStack: PlanDocument[];
   redoStack: PlanDocument[];
+  /** Set once the plan has been saved to D1; absent for a purely local plan. */
+  cloudRef?: CloudRef;
 };
 
 function openDb(): Promise<IDBDatabase> {
@@ -68,6 +72,8 @@ export class PlanStore {
   private record: StoredRecord;
   private provider: PlanProvider | null = null;
   private listeners: Array<() => void> = [];
+  private sync: PlanSync | null = null;
+  private readOnlyReason: string | null = null;
 
   private constructor(record: StoredRecord) {
     this.record = record;
@@ -94,6 +100,50 @@ export class PlanStore {
     store.db = db;
     await store.persist();
     return store;
+  }
+
+  /**
+   * Adopts a plan opened from a share link (FR-14). A read-only link is kept out of the
+   * local plan list entirely: it belongs to whoever sent it, and quietly taking ownership
+   * of someone else's plan on open would be the wrong default.
+   */
+  async adoptShared(input: { doc: PlanDocument; access: "read" | "edit"; id: string; token: string }): Promise<void> {
+    this.record = {
+      id: input.doc.id,
+      doc: input.doc,
+      chatHistory: [],
+      undoStack: [],
+      redoStack: [],
+      cloudRef: input.access === "edit" ? { id: input.id, editToken: input.token, shareToken: "" } : undefined,
+    };
+    this.readOnlyReason = input.access === "read" ? "You are viewing a shared plan. Export a copy to edit it." : null;
+    if (input.access === "edit") await this.persist();
+    this.emit();
+  }
+
+  attachSync(sync: PlanSync): void {
+    this.sync = sync;
+  }
+
+  getSync(): PlanSync | null {
+    return this.sync;
+  }
+
+  get readOnly(): boolean {
+    return this.readOnlyReason !== null;
+  }
+
+  get readOnlyMessage(): string | null {
+    return this.readOnlyReason;
+  }
+
+  get cloudRef(): CloudRef | null {
+    return this.record.cloudRef ?? null;
+  }
+
+  async setCloudRef(ref: CloudRef): Promise<void> {
+    this.record.cloudRef = ref;
+    await this.persist();
   }
 
   setProvider(provider: PlanProvider | null): void {
@@ -138,6 +188,7 @@ export class PlanStore {
 
   /** Direct manual edit (toolbar), bypassing chat/provider entirely — RTE-4's manual-editor path. */
   async applyManual(ops: PatchOp[]): Promise<TurnResult> {
+    if (this.readOnly) return { kind: "error", message: this.readOnlyReason! };
     const prevDoc = this.record.doc;
     const result = applyPatch(prevDoc, { ops, source: "user" });
     if (!result.ok) {
@@ -147,11 +198,13 @@ export class PlanStore {
     this.pushUndo(prevDoc);
     this.record.doc = result.doc;
     await this.persist();
+    this.sync?.schedule({ ops, source: "user" });
     this.emit();
     return { kind: "applied", changes: result.changes };
   }
 
   async submitChatTurn(utterance: string): Promise<TurnResult> {
+    if (this.readOnly) return { kind: "error", message: this.readOnlyReason! };
     const historyBefore = [...this.record.chatHistory];
     this.record.chatHistory.push({ role: "user", text: utterance });
 
@@ -168,12 +221,14 @@ export class PlanStore {
     if (outcome.kind === "undo") {
       const undone = this.undo();
       await this.persist();
+      if (undone) this.sync?.schedule();
       this.emit();
       return undone ? { kind: "applied", changes: ["Undone"] } : { kind: "noop" };
     }
     if (outcome.kind === "redo") {
       const redone = this.redo();
       await this.persist();
+      if (redone) this.sync?.schedule();
       this.emit();
       return redone ? { kind: "applied", changes: ["Redone"] } : { kind: "noop" };
     }
@@ -187,9 +242,10 @@ export class PlanStore {
     this.pushUndo(this.record.doc);
     this.record.doc = outcome.doc;
     const narration = outcome.kind === "provider" ? outcome.narration : undefined;
-    const text = formatAppliedTurn({ changes: outcome.changes, narration });
+    const text = formatAppliedTurn({ changes: outcome.changes, narration, warnings: outcome.warnings });
     this.record.chatHistory.push({ role: "assistant", text });
     await this.persist();
+    this.sync?.schedule();
     this.emit();
     return { kind: "applied", changes: outcome.changes, narration: outcome.kind === "provider" ? outcome.narration : undefined };
   }
@@ -214,6 +270,7 @@ export class PlanStore {
   async undoManual(): Promise<void> {
     if (this.undo()) {
       await this.persist();
+      this.sync?.schedule();
       this.emit();
     }
   }
@@ -221,6 +278,7 @@ export class PlanStore {
   async redoManual(): Promise<void> {
     if (this.redo()) {
       await this.persist();
+      this.sync?.schedule();
       this.emit();
     }
   }
@@ -229,8 +287,9 @@ export class PlanStore {
     this.pushUndo(this.record.doc);
     this.record.doc = doc;
     await this.persist();
+    this.sync?.schedule();
     this.emit();
   }
 }
 
-export type { Patch };
+export type { Patch, SyncStatus };

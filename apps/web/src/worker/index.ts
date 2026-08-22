@@ -1,14 +1,15 @@
 // Thin Cloudflare Worker — specs.md §2 ARC-1..ARC-3, §8.3. Static assets, feature
-// flags, and the Tier 1 inference proxy. Never parses plan documents (there is no
-// /api/plans endpoint in Phase 1 — persistence is IndexedDB-only per the phasing
-// table) and never buffers the AI response body beyond relaying it (T1-6).
+// flags, the Tier 1 inference proxy, and plan document CRUD. Plan bodies are stored and
+// returned as opaque text and are never parsed (ARC-1); the AI response body is never
+// buffered beyond relaying it (T1-6).
 
 import type { Env } from "./env";
 import { verifyTurnstile } from "./turnstile";
 import { checkQuota, hashClientBucketKey, pruneOldQuotaRows, recordTurn } from "./quota";
-import { isRateLimited } from "./rateLimiter";
+import { isRateLimited, PLAN_WRITE_LIMIT } from "./rateLimiter";
 import { readClientId, setClientIdCookie } from "./cookies";
 import { errorResponse } from "./redact";
+import { handlePlans } from "./plans";
 
 // Workers AI retires models on a published schedule, and a retired id fails the whole
 // request (the previous default was deprecated out from under this Worker mid-flight).
@@ -28,6 +29,9 @@ async function handleConfig(env: Env): Promise<Response> {
     JSON.stringify({
       tier1Enabled,
       turnstileSiteKey: tier1Enabled ? env.TURNSTILE_SITE_KEY : undefined,
+      // The client only offers cloud sync and share links when D1 is actually bound;
+      // without it, editing carries on against IndexedDB alone (ARC-3, RTE-4's spirit).
+      cloudSyncEnabled: Boolean(env.DB) && env.CLOUD_SYNC_ENABLED !== "false",
     }),
     { headers: { "content-type": "application/json" } },
   );
@@ -39,7 +43,7 @@ async function handleInfer(request: Request, env: Env): Promise<Response> {
   }
 
   const ip = getIp(request);
-  if (isRateLimited(ip)) {
+  if (isRateLimited(`infer:${ip}`)) {
     return errorResponse("Too many requests", 429, { reason: "rate_limited" });
   }
 
@@ -125,6 +129,28 @@ export default {
     }
     if (url.pathname === "/api/infer" && request.method === "POST") {
       return handleInfer(request, env);
+    }
+    if (url.pathname.startsWith("/api/plans")) {
+      if (env.CLOUD_SYNC_ENABLED === "false") return errorResponse("Cloud sync is disabled on this deployment", 503);
+      const ip = getIp(request);
+      if (request.method !== "GET" && isRateLimited(`plans:${ip}`, PLAN_WRITE_LIMIT)) {
+        return errorResponse("Too many requests", 429, { reason: "rate_limited" });
+      }
+      // A plan's owner is identified by the same client cookie the quota uses; a first
+      // save mints it, and the response has to carry it back or the next save is a
+      // different owner.
+      let clientId = readClientId(request);
+      let mintedCookie = false;
+      if (!clientId) {
+        clientId = crypto.randomUUID();
+        mintedCookie = true;
+      }
+      const response = await handlePlans(request, env, url, clientId);
+      if (!response) return errorResponse("Not found", 404);
+      if (!mintedCookie) return response;
+      const headers = new Headers(response.headers);
+      setClientIdCookie(headers, clientId);
+      return new Response(response.body, { status: response.status, headers });
     }
     if (url.pathname.startsWith("/api/")) {
       return errorResponse("Not found", 404);

@@ -16,6 +16,7 @@ export type ProviderState = {
 type ConfigResponse = {
   turnstileSiteKey?: string;
   tier1Enabled?: boolean;
+  cloudSyncEnabled?: boolean;
 };
 
 export class ProviderManager {
@@ -29,6 +30,8 @@ export class ProviderManager {
   // Set once the user picks a tier by hand, so a late-arriving Tier 1 can't yank the
   // selection back out from under them mid-session (RTE-2 beats RTE-1).
   private manuallySelected = false;
+  /** /api/config as fetched during init; empty until then, and after a failed fetch. */
+  private config: ConfigResponse = {};
 
   async init(): Promise<void> {
     // Tier 0 is the whole reason a first turn can feel instant, and nothing about it
@@ -47,6 +50,7 @@ export class ProviderManager {
     } catch {
       // No worker reachable (e.g. static-only preview) — Tier 1 simply stays unavailable.
     }
+    this.config = config;
 
     if (config.tier1Enabled && config.turnstileSiteKey) {
       try {
@@ -110,6 +114,11 @@ export class ProviderManager {
     if (this.activeId === "tier0-on-device") return this.tier0;
     if (this.activeId === "tier1-hosted") return this.tier1;
     return null;
+  }
+
+  /** Feature flags from the Worker. Cloud sync and share links are gated on these. */
+  getConfig(): ConfigResponse {
+    return this.config;
   }
 
   getState(): ProviderState {

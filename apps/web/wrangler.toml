@@ -12,7 +12,7 @@ binding = "ASSETS"
 [ai]
 binding = "AI"
 
-# D1 — quota tracking only in Phase 1 (plans/plan_versions arrive in Phase 2).
+# D1 — Tier 1 quota (T1-3/T1-4) plus plan documents and patch history (FR-13..FR-15).
 # Create with: `npx wrangler d1 create floorcraft`, then paste the returned
 # database_id below. Apply the schema with `npm run db:migrate:remote`.
 [[d1_databases]]
@@ -36,6 +36,9 @@ dataset = "floorcraft_infer"
 
 [vars]
 TIER1_ENABLED = "true"
+# Set to "false" to run without cloud plan storage: /api/plans stops answering and the
+# client keeps everything in IndexedDB, share links included (i.e. absent).
+CLOUD_SYNC_ENABLED = "true"
 DAILY_QUOTA_PER_CLIENT = "12"
 GLOBAL_NEURON_BUDGET = "7000"
 # Leave TIER1_MODEL unset to track the Worker's own candidate list, which falls back
