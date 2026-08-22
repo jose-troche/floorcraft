@@ -302,7 +302,16 @@ export type PatchOp =
   | { op: "removeLevel"; levelId: LevelId }
   | { op: "setActiveLevel"; levelId: LevelId }
   | { op: "renameLevel"; levelId: LevelId; name: string }
-  | { op: "setLevelProps"; levelId: LevelId; elevation?: number; floorToCeiling?: number };
+  | { op: "setLevelProps"; levelId: LevelId; elevation?: number; floorToCeiling?: number }
+  // Raster import (Phase 4, FR-24). Always creates a new level in freeform mode — the
+  // imported geometry has no generator tree by construction — and switches to it.
+  | {
+      op: "importLevel";
+      levelId?: LevelId;
+      name?: string;
+      boundaryMm: { widthMm: number; depthMm: number };
+      rooms: Array<{ roomId?: RoomId; program: RoomProgram; name?: string; rects: Rect[] }>;
+    };
 
 export type Patch = {
   ops: PatchOp[];

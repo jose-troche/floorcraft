@@ -1,4 +1,4 @@
-# Floorcraft — Phases 1, 2 and 3
+# Floorcraft — Phases 1, 2, 3 and 4
 
 Phase 1 ("Prove the loop") of `specs.md`: description → summary → patch →
 slicing tree → wall graph → SVG, with Tier 0 (on-device) and Tier 1 (hosted
@@ -12,7 +12,13 @@ links, and DXF + PDF export.
 Phase 3 ("Fidelity and Tiers 2/3") adds detached/freeform wall-graph editing
 with L-shaped rooms, multi-storey levels with stair-alignment checking, IFC4
 and glTF export, and two more inference tiers — OpenRouter (Tier 2) and
-bring-your-own-key (Tier 3). Still deployable on Cloudflare's free tier.
+bring-your-own-key (Tier 3).
+
+Phase 4 ("Raster import", optional) adds scanning an existing floor plan
+image into a new, editable level: OpenCV.js line detection client-side,
+R2-backed image storage, manual scale calibration, and a reviewable
+per-wall accept/reject draft before anything is committed. Still deployable
+on Cloudflare's free tier.
 
 ## Layout
 
@@ -21,12 +27,13 @@ packages/core/   Pure TypeScript domain engine (no DOM, no network) — solver,
                  wall graph builder (rect unions + L-shapes), patch reducer,
                  opening placement, drag planning, SVG renderer, DXF/PDF/
                  JSON/IFC/glTF export, deterministic intent + dimension
-                 parsing, stair-alignment checking, provider interface +
-                 Tier 0/1/2/3. Reusable outside the web UI (spec §10, MCP
-                 server, Phase ≥2).
+                 parsing, stair-alignment checking, raster-import geometry
+                 (collinear merge, axis snap, planar face traversal,
+                 rectangle decomposition), provider interface + Tier 0/1/2/3.
+                 Reusable outside the web UI (spec §10, MCP server, Phase ≥2).
 apps/web/        Vite frontend (chat + manual editor + interactive canvas) and
                  the Cloudflare Worker (static assets, /api/config, /api/infer,
-                 /api/plans).
+                 /api/plans, /api/uploads).
 ```
 
 ## Phase 2 at a glance
@@ -168,6 +175,68 @@ traffic onto the Workers Free tier's request quota instead of the `[assets]`
 binding's unbilled/unlimited path (specs.md §8.1) — a real cost trade-off,
 left as a deliberate choice rather than made silently. See the comment in
 `security.ts` for the full reasoning.
+
+## Phase 4 at a glance — raster import (§6.5, optional)
+
+| Capability | Spec | Where |
+|---|---|---|
+| Deskew, adaptive threshold, morphological close, Hough line detection | FR-21 | `apps/web/src/client/rasterPipeline.ts` |
+| Collinear merge, axis snap, planar wall graph, face traversal, rectangle decomposition | FR-21 | `packages/core/src/rasterImport.ts` |
+| Manual scale calibration (click two points, enter the real length) | FR-22 | `apps/web/src/client/rasterImportUi.ts` |
+| Per-wall accept/reject review before anything is committed | FR-25 | `apps/web/src/client/rasterImportUi.ts` |
+| Detached (no generator) result | FR-24 | `importLevel` op, `packages/core/src/patch.ts` |
+| Source image storage | FR-20 | `apps/web/src/worker/uploads.ts` (R2, `UPLOADS` binding) |
+
+### Architecture: FR-24's "detached level" is Phase 3's freeform generator
+
+FR-24 predates Phase 3's rect-union work and says import "MUST produce a
+detached level (no generator)... this is the requirement that forces DM-1."
+The actual point — the canonical `WallGraph` can't depend on a slicing tree,
+because raster-traced geometry can't be expressed as one — is exactly what
+DM-1 already guarantees and what Phase 3's freeform generator
+(`{kind: "freeform", cells}`) already implements. So import produces a new
+level with a freeform generator and no `savedTree` (there was never a tree to
+restore to), via one new op: `importLevel {boundaryMm, rooms: [{program,
+name?, rects}]}`. This reuses every piece of Phase 3's freeform machinery —
+`buildWallGraph`'s cycle tracing, drag-to-reshape, opening placement — for
+free, rather than inventing a second "detached" representation to maintain.
+
+### The pipeline, and what's actually verified
+
+FR-21's pipeline splits at the image/geometry boundary, and so does the
+testing story:
+
+- **Pure geometry** (`packages/core/src/rasterImport.ts`: collinear merge,
+  axis snap, planar graph construction, face traversal, rectangle
+  decomposition, scale-calibration math) is ordinary TypeScript with no
+  platform dependency (ARC-2) and is fully unit-tested against synthetic line
+  segments — including a deliberately noisy, gapped, slightly-skewed input —
+  in `packages/core/test/rasterImport.test.ts` and, end to end through the
+  `importLevel` op and the real reducer, `test/importLevel.test.ts`.
+- **The OpenCV.js stages** (`apps/web/src/client/rasterPipeline.ts`: deskew,
+  adaptive threshold, morphological close, `HoughLinesP` line detection) are
+  written against OpenCV's long-stable, widely-documented core API, but this
+  needs a browser, the ~8 MB WASM binary, and a real scanned floor plan to
+  mean anything — the same reason Tier 0's on-device model and canvas
+  gestures aren't in `packages/core`'s unit suite either. What *is* verified:
+  the R2 upload/retrieve round-trip (`apps/web/src/worker/uploads.ts`) works
+  against a real, locally-simulated bucket, and the import panel opens,
+  shows its file picker, and closes cleanly with no console errors — both as
+  a permanent Playwright test (`apps/web/e2e/canvas.spec.ts`, skips itself
+  when `UPLOADS` isn't configured for the local run). **Running the actual
+  OpenCV.js pipeline against a real scanned or photographed floor plan has
+  not been done in this environment** — do that before relying on detection
+  quality, the same discipline as the IFC/glTF exporters above.
+- OpenCV.js itself is loaded lazily from `https://docs.opencv.org/4.x/opencv.js`
+  (NFR-2: it must not affect first paint, and this codebase has no npm
+  dependency on it) — `security.ts`'s CSP names that origin in `script-src`
+  and `connect-src` (the latter for the `.wasm` binary fetch) and adds
+  `'wasm-unsafe-eval'`, the modern CSP directive for WASM compilation.
+- **Not implemented**: FR-23's optional vision-model labelling/sanity-check
+  pass. Imported rooms default to program `"other"`; the user re-labels them
+  afterward with the same chat/manual tools as any other room. FR-23 is a
+  MAY, and this is a legitimate scope cut, not an oversight — worth
+  revisiting once the deterministic pipeline's real-world accuracy is known.
 
 ### Commands resolved without inference (INF-5, DIM-1..DIM-6)
 
@@ -312,6 +381,15 @@ Cloudflare account and to be logged in via `npx wrangler login` from
    (both are on by default for most accounts; Analytics Engine logging is
    best-effort — the Worker skips it silently if the binding is absent).
 
+4b. **Optional: create the R2 bucket for raster import** (FR-20, Phase 4):
+   ```bash
+   cd apps/web
+   npx wrangler r2 bucket create floorcraft-uploads
+   ```
+   Then uncomment the `[[r2_buckets]]` block in `wrangler.toml`. Without
+   this, `/api/config` reports `rasterImportEnabled: false` and the "Import
+   from image…" button doesn't appear — the rest of the app is unaffected.
+
 5. **Build and deploy**:
    ```bash
    npm run deploy
@@ -357,7 +435,12 @@ choosing to connect one.
   edit is open question 6's harder version, deliberately not attempted here.
 - **A live, filtered OpenRouter model picker** — Tier 2 uses a hardcoded
   free-tier-eligible default instead of fetching and filtering `/models`.
-- Raster import — Phase 4.
+- **FR-23's optional vision-model pass** for raster-import room labelling —
+  imported rooms default to program `"other"`; see "Phase 4 at a glance"
+  above.
+- **Real-world raster-import accuracy** — the deterministic geometry
+  pipeline is fully unit-tested; the OpenCV.js stages have not been run
+  against a real scanned or photographed floor plan in this environment.
 - The MCP server module (spec §10) — optional, any phase ≥ 2.
 
 Phase 2 documents add an optional `levels[].openings` array; Phase 3 changes

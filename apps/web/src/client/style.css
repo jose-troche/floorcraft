@@ -496,3 +496,63 @@ fieldset input, fieldset select {
   background: var(--accent);
   color: var(--accent-fg);
 }
+
+/* ---------------------------------------------------- raster import (Phase 4) */
+
+.raster-import-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem;
+  overflow: auto;
+}
+
+.raster-import-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.raster-import-note {
+  color: var(--muted);
+  font-size: 0.85rem;
+  max-width: 46em;
+}
+
+.raster-review {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  flex: 1;
+  min-height: 0;
+}
+
+.raster-review-stage {
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  overflow: hidden;
+  max-height: 70vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-bg);
+}
+
+.raster-review-image {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+}
+
+.raster-review-overlay line,
+.raster-review-overlay circle {
+  vector-effect: non-scaling-stroke;
+}
+
+.raster-review-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}

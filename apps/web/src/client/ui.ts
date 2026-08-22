@@ -25,6 +25,7 @@ import type { PlanStore } from "./store";
 import type { ProviderId, ProviderManager } from "./providers";
 import * as openrouterAuth from "./openrouterAuth";
 import { clearByokKey, getByokKey, setByokKey, type Tier3Vendor } from "./byokKeys";
+import type { RasterImportPanel } from "./rasterImportUi";
 import { CanvasView } from "./canvas";
 import type { SyncStatus } from "./sync";
 
@@ -57,6 +58,10 @@ export class AppUI {
   /** RTE-3: quota exhaustion is explicit and must be acknowledged, not silently retried —
    * dismissing just hides the banner for this session, it doesn't change the tier. */
   private quotaBannerDismissed = false;
+  /** Raster import (Phase 4, FR-25) — shown as a full-panel takeover, not a normal tab,
+   * since it's a one-shot multi-step flow (upload, review, calibrate) rather than
+   * ongoing editing. */
+  private rasterImportPanel: RasterImportPanel | null = null;
   /**
    * Built once and re-parented on every render. The canvas holds live gesture state and
    * a pan/zoom position; rebuilding it per render would drop a drag mid-flight.
@@ -95,6 +100,11 @@ export class AppUI {
     this.root.appendChild(this.renderHeader(providerState));
     if (providerState.tier1Availability === "exhausted" && !this.quotaBannerDismissed) {
       this.root.appendChild(this.renderQuotaExhaustedBanner());
+    }
+
+    if (this.rasterImportPanel) {
+      this.root.appendChild(this.rasterImportPanel.element);
+      return;
     }
 
     const main = document.createElement("main");
@@ -153,6 +163,32 @@ export class AppUI {
     header.appendChild(h1);
 
     header.appendChild(this.renderLevelSwitcher());
+
+    if (this.providers.getConfig().rasterImportEnabled) {
+      const importBtn = document.createElement("button");
+      importBtn.textContent = "Import from image…";
+      importBtn.title = "Scan or photograph an existing floor plan and turn it into a new level (FR-20..FR-25)";
+      importBtn.onclick = () => {
+        // NFR-2: opencv.js is a multi-hundred-kilobyte-to-megabyte payload downstream of
+        // this — the whole raster-import module stays out of the main bundle until
+        // someone actually clicks this button.
+        void import("./rasterImportUi").then(({ RasterImportPanel }) => {
+          this.rasterImportPanel = new RasterImportPanel(
+            this.providers.getConfig().rasterImportEnabled === true,
+            (ops) => {
+              this.rasterImportPanel = null;
+              void this.runManual(ops);
+            },
+            () => {
+              this.rasterImportPanel = null;
+              this.render();
+            },
+          );
+          this.render();
+        });
+      };
+      header.appendChild(importBtn);
+    }
 
     const badge = document.createElement("span");
     badge.className = "tier-badge";

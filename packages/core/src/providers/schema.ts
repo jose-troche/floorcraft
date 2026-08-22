@@ -72,6 +72,7 @@ export const USER_ONLY_PATCH_OPS = [
   "setRoomRects",
   "removeLevel",
   "setLevelProps",
+  "importLevel",
 ] as const;
 
 // Every op name that can legally reach validateOp: the `allowed` set passed in is always

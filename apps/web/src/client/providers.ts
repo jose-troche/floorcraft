@@ -25,6 +25,7 @@ type ConfigResponse = {
   turnstileSiteKey?: string;
   tier1Enabled?: boolean;
   cloudSyncEnabled?: boolean;
+  rasterImportEnabled?: boolean;
 };
 
 export class ProviderManager {

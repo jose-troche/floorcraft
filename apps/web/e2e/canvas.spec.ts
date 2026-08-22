@@ -128,6 +128,30 @@ test("serves a strict CSP on API responses, that still permits the Blob-download
   expect(download.suggestedFilename()).toMatch(/\.json$/);
 });
 
+test("raster import entry point opens and closes cleanly, with no console errors (FR-20..FR-25)", async ({ page }) => {
+  // Needs the UPLOADS R2 binding configured (wrangler.toml's commented-out [[r2_buckets]]
+  // block) — the default local run doesn't have it, same reason the RTE-4 test below
+  // can't exercise Tier 1 without a live Turnstile secret. `wrangler dev --local`
+  // simulates R2 without any real Cloudflare resources, so uncommenting that block is
+  // enough to run this for real.
+  const config = await (await page.request.get("/api/config")).json();
+  test.skip(!config.rasterImportEnabled, "raster import (UPLOADS R2 binding) is not configured for this local run");
+
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.goto("/");
+
+  const importBtn = page.getByRole("button", { name: "Import from image…" });
+  await expect(importBtn).toBeVisible();
+  await importBtn.click();
+  await expect(page.getByRole("heading", { name: "Import from a floor plan image" })).toBeVisible();
+  await expect(page.locator('input[type="file"]')).toBeVisible();
+
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(importBtn).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 test("with no inference tier reachable, chat is disabled and manual editing still works (RTE-4)", async ({ page }) => {
   await page.goto("/");
   // Tier 0 is Chrome-desktop-only and unavailable in this sandboxed browser profile;

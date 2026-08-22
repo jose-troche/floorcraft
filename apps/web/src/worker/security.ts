@@ -16,14 +16,17 @@
 
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
-  "script-src 'self' https://challenges.cloudflare.com",
+  // 'wasm-unsafe-eval' is what lets the browser JIT-compile a WebAssembly module under a
+  // strict CSP (opencv.js, Phase 4's raster import) without falling back to 'unsafe-eval'.
+  "script-src 'self' https://challenges.cloudflare.com https://docs.opencv.org 'wasm-unsafe-eval'",
   "style-src 'self'",
   "img-src 'self' data: blob:",
   "frame-src https://challenges.cloudflare.com",
   // Tier 1 goes through this Worker ('self'); Tiers 2/3 call their providers directly
   // from the browser (T2-1, T3-3) and need their own origins here or the browser's own
-  // CSP — not just this Worker's absence from the request path — blocks them.
-  "connect-src 'self' https://openrouter.ai https://api.anthropic.com https://api.openai.com https://generativelanguage.googleapis.com",
+  // CSP — not just this Worker's absence from the request path — blocks them. opencv.js
+  // also fetches its own .wasm binary from the same origin it was loaded from.
+  "connect-src 'self' https://openrouter.ai https://api.anthropic.com https://api.openai.com https://generativelanguage.googleapis.com https://docs.opencv.org",
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",

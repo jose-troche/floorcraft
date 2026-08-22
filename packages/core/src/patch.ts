@@ -647,6 +647,7 @@ const LEVEL_MANAGEMENT_OPS = new Set<PatchOp["op"]>([
   "setActiveLevel",
   "renameLevel",
   "setLevelProps",
+  "importLevel",
 ]);
 
 /** Same reasoning as nextRoomSeq/nextOpeningSeq: ids must clear every id in use. */
@@ -716,6 +717,38 @@ function applyLevelManagementOps(doc: PlanDocument, ops: PatchOp[]): LevelManage
         levels = [...levels, newLevel];
         activeLevelId = levelId;
         changes.push(`Added ${newLevel.name}`);
+        break;
+      }
+      case "importLevel": {
+        // FR-24: always a new level in freeform mode — raster-detected geometry has no
+        // generator tree to attach to, by construction.
+        const levelId = op.levelId && !levels.some((l) => l.id === op.levelId) ? op.levelId : `level-${levelSeq++}`;
+        const cells: RoomCell[] = [];
+        const importedRooms: Record<RoomId, Room> = {};
+        let roomSeq = 0;
+        for (const room of op.rooms) {
+          let roomId = room.roomId && !importedRooms[room.roomId] ? room.roomId : `imported-${roomSeq++}`;
+          while (importedRooms[roomId]) roomId = `imported-${roomSeq++}`;
+          for (const r of room.rects) cells.push({ ...r, roomId });
+          importedRooms[roomId] = {
+            name: room.name ?? defaultNameFor(room.program, Object.values(importedRooms).filter((m) => m.program === room.program).length),
+            program: room.program,
+            boundary: [],
+          };
+        }
+        const highestTop = levels.length > 0 ? Math.max(...levels.map((l) => l.elevation + l.floorToCeiling)) : 0;
+        const newLevel: Level = {
+          id: levelId,
+          name: op.name ?? "Imported Level",
+          elevation: highestTop,
+          floorToCeiling: 2440,
+          boundary: op.boundaryMm,
+          generator: { kind: "freeform", cells },
+          graph: { nodes: {}, edges: {}, rooms: importedRooms },
+        };
+        levels = [...levels, newLevel];
+        activeLevelId = levelId;
+        changes.push(`Imported ${newLevel.name} (${Object.keys(importedRooms).length} rooms)`);
         break;
       }
       case "removeLevel": {
