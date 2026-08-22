@@ -1,20 +1,55 @@
-# Floorcraft — Phase 1
+# Floorcraft — Phases 1 and 2
 
 Phase 1 ("Prove the loop") of `specs.md`: description → summary → patch →
 slicing tree → wall graph → SVG, with Tier 0 (on-device) and Tier 1 (hosted
 free pool) providers, a deterministic intent matcher, IndexedDB persistence,
-and SVG + JSON export — deployable on Cloudflare's free tier.
+and SVG + JSON export.
+
+Phase 2 ("Editing and interchange") adds canvas direct manipulation, doors and
+windows, deterministic dimension parsing, D1-backed persistence with share
+links, and DXF + PDF export. Still deployable on Cloudflare's free tier.
 
 ## Layout
 
 ```
 packages/core/   Pure TypeScript domain engine (no DOM, no network) — solver,
-                 wall graph builder, patch reducer, SVG renderer, JSON export,
-                 deterministic intent matcher, provider interface + Tier 0/1.
+                 wall graph builder, patch reducer, opening placement, drag
+                 planning, SVG renderer, DXF/PDF/JSON export, deterministic
+                 intent + dimension parsing, provider interface + Tier 0/1.
                  Reusable outside the web UI (spec §10, MCP server, Phase ≥2).
-apps/web/        Vite frontend (chat + manual editor + canvas) and the
-                 Cloudflare Worker (static assets, /api/config, /api/infer).
+apps/web/        Vite frontend (chat + manual editor + interactive canvas) and
+                 the Cloudflare Worker (static assets, /api/config, /api/infer,
+                 /api/plans).
 ```
+
+## Phase 2 at a glance
+
+| Capability | Spec | Where |
+|---|---|---|
+| Drag wall, resize boundary, drag/rotate openings, drag label, inline rename | FR-7, SLV-5, SLV-8 | `packages/core/src/dragPlan.ts` + `apps/web/src/client/canvas.ts` |
+| Pan / zoom / fit, touch-sized targets, keyboard editing | FR-9, NFR-6 | `apps/web/src/client/canvas.ts` |
+| Doors and windows that survive re-solving | §3.2, INF-6 | `packages/core/src/openings.ts` |
+| Dimension strings on every wall run; pinned-room markers | FR-8, DIM-7 | `packages/core/src/svgRenderer.ts` |
+| Deterministic dimension parsing before any model call | DIM-1..DIM-6, FR-2 | `packages/core/src/dimensionParser.ts` |
+| DXF R12 and PDF export | FR-16..FR-19 | `packages/core/src/{dxfExport,pdfExport}.ts` |
+| D1 persistence, share links, patch history | FR-13..FR-15, SEC-2/3 | `apps/web/src/worker/plans.ts` + `apps/web/src/client/sync.ts` |
+
+Every canvas gesture is turned into ordinary patch ops and applied through the
+same reducer as a chat turn, so direct manipulation is undoable like anything
+else (FR-3) and the language model never emits geometry (§1.2).
+
+### DXF golden fixture (FR-17)
+
+`packages/core/test/golden/plan.dxf` is byte-compared in CI against a fixed
+fixture plan. When the exporter changes on purpose:
+
+```bash
+cd packages/core && UPDATE_GOLDEN=1 npx vitest run test/dxfExport.test.ts
+```
+
+Review the diff, then re-run the manual import smoke test into LibreCAD, QCAD,
+AutoCAD and SketchUp — the byte comparison catches drift, not whether the four
+target applications still accept the file.
 
 ## Requirements traceability (Phase 1 exit criteria)
 
@@ -52,6 +87,22 @@ disabled and the app falls back to Tier 0 (if your browser supports it) or the
 manual editor — this is RTE-4's release-blocking behavior, and it's what you'll
 see out of the box.
 
+### End-to-end tests (real browser)
+
+`packages/core`'s test suite covers the pure functions (solver, reducer,
+drag-planning math); it can't exercise the DOM wiring the canvas depends on —
+double-click hit-testing, focus, actual pointer drags. `apps/web/e2e/` covers
+that layer with Playwright, driven against a real `wrangler dev` instance (the
+Worker's `/api/config`/`/api/plans` routes are part of what's under test, so
+Vite's dev server alone isn't enough):
+
+```bash
+cd apps/web
+npm run build && npx wrangler dev --local --port 8788   # terminal 1
+npx playwright install chromium                          # once
+npm run test:e2e                                          # terminal 2
+```
+
 ## Deploying to Cloudflare (free tier)
 
 All of this fits Cloudflare's free tier (Workers, Workers AI's free neuron
@@ -59,7 +110,7 @@ allocation, D1, Workers Static Assets, Analytics Engine). You'll need a
 Cloudflare account and to be logged in via `npx wrangler login` from
 `apps/web/`.
 
-1. **Create the D1 database** (quota tracking only in Phase 1):
+1. **Create the D1 database** (Tier 1 quota, plan documents, and patch history):
    ```bash
    cd apps/web
    npx wrangler d1 create floorcraft
@@ -104,14 +155,17 @@ If you skip steps 2–3, the app still deploys and works fully — Tier 1 just
 reports itself disabled via `/api/config`, and Tier 0 / the manual editor
 take over (RTE-4).
 
-### What's intentionally *not* here yet (Phase 2+)
+If you skip the D1 setup entirely, `/api/config` reports `cloudSyncEnabled:
+false`, the Share button disappears, and plans live in IndexedDB alone —
+editing and export are unaffected.
 
-- D1-backed plan persistence, share links (`/api/plans/*`) — Phase 1 is
-  IndexedDB-only per the phasing table.
-- Canvas direct manipulation (wall drag, opening drag), DXF/PDF export,
-  dimension constraint parsing from chat (DIM-*, SLV-6..9) — all Phase 2.
-- Tier 2 (OpenRouter) / Tier 3 (BYOK) — Phase 3.
+### What's intentionally *not* here yet (Phase 3+)
 
-The patch vocabulary (`INF-6`) and reducer already support openings and
-dimension ops end-to-end so Phase 2 doesn't need a schema migration, but the
-UI and NL parsing for them ship later.
+- Detached wall-graph editing and L-shaped rooms (`DM-2`, `FR-11`), multi-storey
+  with stair alignment, IFC4 and glTF export — Phase 3.
+- Tier 2 (OpenRouter PKCE) / Tier 3 (BYOK) — Phase 3.
+- Raster import — Phase 4.
+- The MCP server module (spec §10) — optional, any phase ≥ 2.
+
+Phase 2 documents add an optional `levels[].openings` array. It is additive, so
+older documents load unchanged and no schema migration is needed.
