@@ -48,7 +48,7 @@ export class AppUI {
   private error: string | null = null;
   private chatBusy = false;
   private pendingLabel: string | null = null;
-  private paperSize: PaperSize = "A4";
+  private paperSize: PaperSize = "Letter";
   private shareLinks: { readOnly: string; edit: string } | null = null;
   /** Options from the last clarifying question, offered as one-tap answers (FR-5). */
   private clarifyOptions: string[] | null = null;
