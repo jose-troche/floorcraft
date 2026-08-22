@@ -95,4 +95,20 @@ describe("provider resilience", () => {
     expect(safeJsonParse('```json\n{"ops":[]}\n```')).toEqual({ ops: [] });
     expect(safeJsonParse("not json at all")).toBe("not json at all");
   });
+
+  it("recovers JSON wrapped in a stray lead-in sentence", () => {
+    expect(safeJsonParse('Here\'s the updated plan: {"ops":[{"op":"removeRoom","roomId":"r1"}]}')).toEqual({
+      ops: [{ op: "removeRoom", roomId: "r1" }],
+    });
+    // A brace that only appears inside a string literal must not confuse the scan.
+    expect(safeJsonParse('Sure! {"ops":[],"narration":"looks like a } to me"}')).toEqual({
+      ops: [],
+      narration: "looks like a } to me",
+    });
+  });
+
+  it("gives up cleanly on truncated JSON rather than throwing", () => {
+    const truncated = '{"ops":[{"op":"addRoom","program":"kitchen"';
+    expect(safeJsonParse(truncated)).toBe(truncated);
+  });
 });
