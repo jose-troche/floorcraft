@@ -7,14 +7,14 @@ import { estimateTokens } from "../planSummary.js";
 import type { OpName } from "./schema.js";
 
 const OP_DOCS: Record<OpName, string> = {
-  addRoom: `addRoom {program, name?, areaWeight, adjacentTo?} — add a room of a known program; areaWeight is relative, not absolute mm2.`,
+  addRoom: `addRoom {program, name?, areaWeight, adjacentTo?, direction?} — add a room of a known program; areaWeight is relative, not absolute mm2. direction is one of "left"|"right"|"above"|"below"|"inside" and positions the new room against adjacentTo; "inside" partitions that room to make space.`,
   removeRoom: `removeRoom {roomId} — delete a room.`,
   renameRoom: `renameRoom {roomId, name} — rename a room.`,
   resizeRoom: `resizeRoom {roomId, areaWeight? | targetAreaMm2?} — change a room's relative size.`,
   swapRooms: `swapRooms {roomIdA, roomIdB} — exchange two rooms' positions/sizes.`,
   setBoundary: `setBoundary {widthMm, depthMm} — set the outer footprint.`,
   setUnits: `setUnits {units: "imperial"|"metric"} — change the display unit system.`,
-  moveRoom: `moveRoom {roomId, relativeTo, direction: "left"|"right"|"above"|"below"} — reposition a room next to another.`,
+  moveRoom: `moveRoom {roomId, relativeTo, direction: "left"|"right"|"above"|"below"|"inside"} — reposition a room next to another.`,
   setSplit: `setSplit {nodePath: number[], axis?, ratio?} — directly edit one split node of the generator tree.`,
   addOpening: `addOpening {betweenRooms: [a,b] | edgeId, kind: "door"|"window"|"cased"|"pass-through", width?} — add a wall opening.`,
   removeOpening: `removeOpening {openingId} — remove a wall opening.`,

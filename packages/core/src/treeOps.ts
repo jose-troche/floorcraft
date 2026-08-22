@@ -1,7 +1,7 @@
 // Structural edits to a SlicingTree generator. The patch reducer builds and mutates
 // the tree here; solveSlicingTree (slicingSolver.ts) only ever reads it.
 
-import type { NodePath, RoomId, SlicingLeaf, SlicingTree } from "./types.js";
+import type { NodePath, RoomId, SlicingLeaf, SlicingTree, SpatialDirection } from "./types.js";
 
 export function getNodeAt(tree: SlicingTree, path: NodePath): SlicingTree {
   let node = tree;
@@ -47,9 +47,26 @@ function largestLeafPath(tree: SlicingTree): NodePath {
 
 export type InsertOptions = {
   adjacentTo?: RoomId;
+  /**
+   * Which side of `adjacentTo` the new room lands on. Without it the split axis
+   * alternates by tree depth, which balances the layout but says nothing about where a
+   * room ends up — so any request that names a side must pass one.
+   */
+  direction?: SpatialDirection;
   /** Alternates split axis by tree depth when no adjacency hint is given, for a balanced layout. */
   depthHint?: number;
 };
+
+/**
+ * left/right divide along a vertical cut line, above/below along a horizontal one.
+ * "inside" carries no axis of its own (see SpatialDirection) and keeps the alternating
+ * default, which puts a closet against whichever wall of the host room the depth implies.
+ */
+function axisFor(direction: SpatialDirection | undefined, targetPath: NodePath): "h" | "v" {
+  if (direction === "left" || direction === "right") return "v";
+  if (direction === "above" || direction === "below") return "h";
+  return targetPath.length % 2 === 0 ? "v" : "h";
+}
 
 export function insertLeaf(
   tree: SlicingTree | undefined,
@@ -60,10 +77,15 @@ export function insertLeaf(
 
   const targetPath = opts.adjacentTo ? findLeafPath(tree, opts.adjacentTo) ?? largestLeafPath(tree) : largestLeafPath(tree);
   const target = getNodeAt(tree, targetPath) as SlicingLeaf;
-  const axis: "h" | "v" = targetPath.length % 2 === 0 ? "v" : "h";
+  const axis = axisFor(opts.direction, targetPath);
+  // children[0] is the left/top side of the cut, so "left" and "above" put the new room
+  // first and everything else puts it second.
+  const newRoomFirst = opts.direction === "left" || opts.direction === "above";
+  const children: [SlicingTree, SlicingTree] = newRoomFirst ? [newLeaf, target] : [target, newLeaf];
   const totalWeight = target.areaWeight + newLeaf.areaWeight;
-  const ratio = totalWeight > 0 ? target.areaWeight / totalWeight : 0.5;
-  const split: SlicingTree = { kind: "split", axis, ratio, children: [target, newLeaf] };
+  const firstWeight = newRoomFirst ? newLeaf.areaWeight : target.areaWeight;
+  const ratio = totalWeight > 0 ? firstWeight / totalWeight : 0.5;
+  const split: SlicingTree = { kind: "split", axis, ratio, children };
   return replaceNodeAt(tree, targetPath, split);
 }
 

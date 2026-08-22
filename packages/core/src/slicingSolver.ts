@@ -57,6 +57,17 @@ function computeMin(node: SlicingTree): MinSize {
   return { w: Math.max(m0.w, m1.w), d: m0.d + m1.d };
 }
 
+/**
+ * The size this subtree demands along `axis`, if it pins one. Only a leaf can pin a
+ * dimension; a split's extent is the sum of what its children negotiate, which the
+ * recursion below settles on its own.
+ */
+function exactSize(node: SlicingTree, axis: "w" | "d"): number | null {
+  if (node.kind !== "leaf") return null;
+  const value = axis === "w" ? node.exactWidth : node.exactDepth;
+  return value !== undefined && value > 0 ? value : null;
+}
+
 function snapWithinRange(value: number, lo: number, hi: number, grid: number): number {
   if (grid <= 0 || hi <= lo) return Math.min(Math.max(value, lo), hi);
   const candidate = Math.round(value / grid) * grid;
@@ -96,9 +107,19 @@ function snapCutLines(
   if (node.axis === "v") {
     const lo = m0.w;
     const hi = rect.w - m1.w;
+    // A pinned width fixes the cut outright, and is deliberately not grid-snapped: the
+    // user named an exact number, and rounding it to the module would quietly return a
+    // room of a different size than the one they asked for (SLV-6 over SLV-2's snap).
+    const exact0 = exactSize(c0, "w");
+    const exact1 = exactSize(c1, "w");
     const ideal = node.ratio * rect.w;
     const raw = Math.min(Math.max(ideal, lo), hi);
-    const w0 = snapWithinRange(raw, lo, hi, grid);
+    const w0 =
+      exact0 !== null
+        ? Math.min(Math.max(exact0, lo), hi)
+        : exact1 !== null
+          ? Math.min(Math.max(rect.w - exact1, lo), hi)
+          : snapWithinRange(raw, lo, hi, grid);
     const w1 = rect.w - w0;
     cuts.push({ path, axis: "v", position: rect.x + w0, rect, min: rect.x + lo, max: rect.x + hi });
     snapCutLines(c0, { x: rect.x, y: rect.y, w: w0, d: rect.d }, grid, [...path, 0], out, cuts);
@@ -106,9 +127,16 @@ function snapCutLines(
   } else {
     const lo = m0.d;
     const hi = rect.d - m1.d;
+    const exact0 = exactSize(c0, "d");
+    const exact1 = exactSize(c1, "d");
     const ideal = node.ratio * rect.d;
     const raw = Math.min(Math.max(ideal, lo), hi);
-    const d0 = snapWithinRange(raw, lo, hi, grid);
+    const d0 =
+      exact0 !== null
+        ? Math.min(Math.max(exact0, lo), hi)
+        : exact1 !== null
+          ? Math.min(Math.max(rect.d - exact1, lo), hi)
+          : snapWithinRange(raw, lo, hi, grid);
     const d1 = rect.d - d0;
     cuts.push({ path, axis: "h", position: rect.y + d0, rect, min: rect.y + lo, max: rect.y + hi });
     snapCutLines(c0, { x: rect.x, y: rect.y, w: rect.w, d: d0 }, grid, [...path, 0], out, cuts);

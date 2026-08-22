@@ -63,6 +63,25 @@ function minSizeFor(program: RoomProgram, constraints?: RoomConstraints): { minW
   return { minWidth, minDepth };
 }
 
+/**
+ * Recomputes a leaf's sizing fields from the room's program and its *current* constraint
+ * set, rather than folding each new constraint into whatever was there before. Doing it
+ * from scratch is what makes clearDimension work: accumulating maxima can only ever
+ * raise a minimum, so a cleared pin used to stay silently in force.
+ */
+function syncLeafConstraints(leaf: SlicingLeaf, program: RoomProgram, constraints?: RoomConstraints): SlicingLeaf {
+  const { minWidth, minDepth } = minSizeFor(program, constraints);
+  const exactWidth = constraints?.width?.exact;
+  const exactDepth = constraints?.depth?.exact;
+  return {
+    ...leaf,
+    minWidth,
+    minDepth,
+    ...(exactWidth !== undefined ? { exactWidth } : { exactWidth: undefined }),
+    ...(exactDepth !== undefined ? { exactDepth } : { exactDepth: undefined }),
+  };
+}
+
 type LevelState = {
   tree: SlicingTree | undefined;
   roomMeta: Record<RoomId, RoomMeta>;
@@ -166,14 +185,17 @@ function applyTreeOps(
       case "addRoom": {
         const roomId = allocateRoomId(state, op.roomId);
         addedRoomIds.push(roomId);
-        const { minWidth, minDepth } = minSizeFor(op.program, op.constraints);
-        const leaf: SlicingLeaf = { kind: "leaf", roomId, areaWeight: op.areaWeight, minWidth, minDepth };
+        const leaf = syncLeafConstraints(
+          { kind: "leaf", roomId, areaWeight: op.areaWeight },
+          op.program,
+          op.constraints,
+        );
         state.roomMeta[roomId] = {
           name: op.name ?? defaultNameFor(op.program, Object.values(state.roomMeta).filter((m) => m.program === op.program).length),
           program: op.program,
           constraints: op.constraints,
         };
-        state.tree = insertLeaf(state.tree, leaf, { adjacentTo: op.adjacentTo });
+        state.tree = insertLeaf(state.tree, leaf, { adjacentTo: op.adjacentTo, direction: op.direction });
         break;
       }
       case "removeRoom": {
@@ -256,7 +278,7 @@ function applyTreeOps(
         }
         const leaf = getNodeAt(state.tree, findLeafPath(state.tree, op.roomId)!) as SlicingLeaf;
         state.tree = removeLeaf(state.tree, op.roomId) ?? undefined;
-        state.tree = insertLeaf(state.tree, leaf, { adjacentTo: op.relativeTo });
+        state.tree = insertLeaf(state.tree, leaf, { adjacentTo: op.relativeTo, direction: op.direction });
         break;
       }
       case "setSplit": {
@@ -287,9 +309,7 @@ function applyTreeOps(
           } else {
             constraints.aspectRatio = { min: op.value, max: op.value };
           }
-          const minWidth = op.dimensionType === "width" ? Math.max(leaf.minWidth ?? 0, op.value) : leaf.minWidth;
-          const minDepth = op.dimensionType === "depth" ? Math.max(leaf.minDepth ?? 0, op.value) : leaf.minDepth;
-          return { leaf: { ...leaf, minWidth, minDepth }, meta: { ...meta, constraints } };
+          return { leaf: syncLeafConstraints(leaf, meta.program, constraints), meta: { ...meta, constraints } };
         });
         if (err) errors.push(`setDimension: ${err}`);
         break;
@@ -302,7 +322,11 @@ function applyTreeOps(
         }
         const constraints = { ...(meta.constraints ?? {}) };
         delete constraints[op.dimensionType];
-        state.roomMeta[op.roomId] = { ...meta, constraints };
+        const err = applyDimensionOp(state, op.roomId, (leaf, m) => ({
+          leaf: syncLeafConstraints(leaf, m.program, constraints),
+          meta: { ...m, constraints },
+        }));
+        if (err) errors.push(`clearDimension: ${err}`);
         break;
       }
       case "setDimensionRange": {
@@ -311,9 +335,7 @@ function applyTreeOps(
           if (op.dimensionType === "width" || op.dimensionType === "depth" || op.dimensionType === "area") {
             constraints[op.dimensionType] = { ...(constraints[op.dimensionType] ?? {}), min: op.minMm, max: op.maxMm };
           }
-          const minWidth = op.dimensionType === "width" && op.minMm ? Math.max(leaf.minWidth ?? 0, op.minMm) : leaf.minWidth;
-          const minDepth = op.dimensionType === "depth" && op.minMm ? Math.max(leaf.minDepth ?? 0, op.minMm) : leaf.minDepth;
-          return { leaf: { ...leaf, minWidth, minDepth }, meta: { ...meta, constraints } };
+          return { leaf: syncLeafConstraints(leaf, meta.program, constraints), meta: { ...meta, constraints } };
         });
         if (err) errors.push(`setDimensionRange: ${err}`);
         break;

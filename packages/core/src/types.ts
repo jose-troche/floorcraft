@@ -169,6 +169,13 @@ export type SlicingLeaf = {
   areaWeight: number;
   minWidth?: number;
   minDepth?: number;
+  /**
+   * A dimension the user pinned outright (SLV-6). Distinct from minWidth/minDepth: a
+   * minimum only stops a room getting too small and otherwise lets areaWeight decide,
+   * whereas an exact value fixes the cut line regardless of the weights around it.
+   */
+  exactWidth?: number;
+  exactDepth?: number;
 };
 
 export type SlicingSplit = {
@@ -229,13 +236,24 @@ export type PlanDocument = {
 
 export type DimensionType = "width" | "depth" | "area" | "aspectRatio";
 
+/**
+ * Where a room goes relative to another one.
+ *
+ * "inside" is a deliberate approximation. A slicing tree is a guillotine partition and
+ * cannot express true containment — a room fully enclosed by another needs the L-shaped
+ * geometry of FR-11 (Phase 3). What it can express, and what "a closet inside the
+ * office" actually means architecturally, is partitioning the host room and giving the
+ * new room a share of it. The host keeps its identity and the remainder of its area.
+ */
+export type SpatialDirection = "left" | "right" | "above" | "below" | "inside";
+
 export type PatchOp =
-  | { op: "addRoom"; roomId?: RoomId; program: RoomProgram; name?: string; areaWeight: number; adjacentTo?: RoomId; constraints?: RoomConstraints }
+  | { op: "addRoom"; roomId?: RoomId; program: RoomProgram; name?: string; areaWeight: number; adjacentTo?: RoomId; direction?: SpatialDirection; constraints?: RoomConstraints }
   | { op: "removeRoom"; roomId: RoomId }
   | { op: "renameRoom"; roomId: RoomId; name: string }
   | { op: "resizeRoom"; roomId: RoomId; areaWeight?: number; targetAreaMm2?: number }
   | { op: "swapRooms"; roomIdA: RoomId; roomIdB: RoomId }
-  | { op: "moveRoom"; roomId: RoomId; relativeTo: RoomId; direction: "left" | "right" | "above" | "below" }
+  | { op: "moveRoom"; roomId: RoomId; relativeTo: RoomId; direction: SpatialDirection }
   | { op: "setSplit"; nodePath: NodePath; axis?: "h" | "v"; ratio?: number }
   | { op: "addOpening"; betweenRooms?: [RoomId, RoomId]; edgeId?: EdgeId; kind: OpeningKind; width?: number; offsetRatio?: number; swing?: DoorSwing }
   | { op: "removeOpening"; openingId: OpeningId }

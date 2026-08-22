@@ -12,7 +12,7 @@
 import { activeLevel } from "./patch.js";
 import { solveSlicingTree, treeMinimumSize, type CutLine, type LeafRect } from "./slicingSolver.js";
 import { findOpeningEdge, edgeEndpoints, OPENING_LIMITS } from "./openings.js";
-import { setSplitAt } from "./treeOps.js";
+import { getNodeAt } from "./treeOps.js";
 import type { EdgeId, PatchOp, PlanDocument, RoomId } from "./types.js";
 
 export type DragPlan = { ok: true; ops: PatchOp[] } | { ok: false; reason: string };
@@ -61,37 +61,28 @@ export function findCutForEdge(doc: PlanDocument, edgeId: EdgeId): CutLine | nul
   return best;
 }
 
-/** Rooms whose width or depth is pinned to an exact value, with the value. */
-function pinnedDimensions(doc: PlanDocument): Array<{ roomId: RoomId; axis: "width" | "depth"; value: number }> {
-  const level = activeLevel(doc);
-  const out: Array<{ roomId: RoomId; axis: "width" | "depth"; value: number }> = [];
-  for (const [roomId, room] of Object.entries(level.graph.rooms)) {
-    const width = room.constraints?.width?.exact;
-    const depth = room.constraints?.depth?.exact;
-    if (width !== undefined) out.push({ roomId, axis: "width", value: width });
-    if (depth !== undefined) out.push({ roomId, axis: "depth", value: depth });
-  }
-  return out;
-}
-
 /**
- * SLV-8. A room whose width or depth is pinned must not have that dimension changed by a
- * drag; the drag is rejected and the caller shows the reason rather than letting the
- * geometry move and snap back.
+ * SLV-8. A cut line with a pinned room on either side is what *sets* that room's size, so
+ * moving it is not a drag the solver can honour -- an exact dimension overrides the split
+ * ratio outright, and the gesture would be discarded with no visible effect. The drag is
+ * refused instead, naming the constraint in the way, which is SLV-8's "rejected with
+ * visual feedback" rather than a drag that silently does nothing.
  */
-function pinnedViolation(doc: PlanDocument, candidateLeaves: LeafRect[], nameOf: (id: RoomId) => string): string | null {
-  const before = solveLevel(doc);
-  if (!before) return null;
-  const beforeById = new Map(before.leaves.map((l) => [l.roomId, l]));
-  for (const pin of pinnedDimensions(doc)) {
-    const was = beforeById.get(pin.roomId);
-    const now = candidateLeaves.find((l) => l.roomId === pin.roomId);
-    if (!was || !now) continue;
-    const wasValue = pin.axis === "width" ? was.w : was.d;
-    const nowValue = pin.axis === "width" ? now.w : now.d;
-    if (Math.abs(nowValue - wasValue) > CUT_EPSILON_MM) {
-      return `${nameOf(pin.roomId)} is pinned to a ${pin.axis} of ${pin.value}mm. Clear that constraint before dragging this wall.`;
-    }
+function pinnedAcrossCut(doc: PlanDocument, cut: CutLine, nameOf: (id: RoomId) => string): string | null {
+  const tree = activeLevel(doc).generator?.tree;
+  if (!tree) return null;
+  const node = getNodeAt(tree, cut.path);
+  if (node.kind !== "split") return null;
+  const axis = cut.axis === "v" ? "width" : "depth";
+
+  for (const child of node.children) {
+    if (child.kind !== "leaf") continue;
+    const pinned = cut.axis === "v" ? child.exactWidth : child.exactDepth;
+    if (pinned === undefined) continue;
+    return (
+      `${nameOf(child.roomId)} is pinned to a ${axis} of ${Math.round(pinned)}mm, which is what fixes this wall. ` +
+      `Clear that constraint to move it.`
+    );
   }
   return null;
 }
@@ -122,32 +113,14 @@ export function planWallDrag(doc: PlanDocument, edgeId: EdgeId, deltaMm: number)
   if (span <= 0) return { ok: false, reason: "That wall can't move." };
   const ratio = (clamped - origin) / span;
 
-  const ops: PatchOp[] = [{ op: "setSplit", nodePath: cut.path, ratio }];
+  // Checked before offering any ops: SLV-8 asks for the drag to be prevented, not
+  // corrected after the fact. This is a structural look at the two subtrees either side
+  // of the cut, so it costs nothing on a live drag's per-frame path.
+  const nameOf = (id: RoomId) => level.graph.rooms[id]?.name ?? id;
+  const pinned = pinnedAcrossCut(doc, cut, nameOf);
+  if (pinned) return { ok: false, reason: pinned };
 
-  // Re-solve the candidate tree to check pinned dimensions before offering the ops:
-  // rejecting here is what makes SLV-8's "prevented, not corrected" true. The check
-  // costs two extra solves, so it is skipped outright when nothing is pinned — this
-  // runs on every frame of a live drag.
-  if (pinnedDimensions(doc).length > 0) {
-    const candidate = applyRatio(doc, cut, ratio);
-    if (candidate) {
-      const nameOf = (id: RoomId) => level.graph.rooms[id]?.name ?? id;
-      const violation = pinnedViolation(doc, candidate, nameOf);
-      if (violation) return { ok: false, reason: violation };
-    }
-  }
-
-  return { ok: true, ops };
-}
-
-/** Solves the tree that would result from setting one split's ratio, without building a graph. */
-function applyRatio(doc: PlanDocument, cut: CutLine, ratio: number): LeafRect[] | null {
-  const level = activeLevel(doc);
-  const tree = level.generator?.tree;
-  if (!tree) return null;
-  const next = setSplitAt(tree, cut.path, { ratio });
-  const solved = solveSlicingTree(next, level.boundary, doc.gridModule);
-  return solved.ok ? solved.leaves : null;
+  return { ok: true, ops: [{ op: "setSplit", nodePath: cut.path, ratio }] };
 }
 
 export type BoundaryHandle = "east" | "south" | "southeast";

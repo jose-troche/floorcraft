@@ -2,7 +2,16 @@
 // specs.md INF-3 (providers return Patch, never prose-with-JSON) and INF-4 (the
 // client MUST validate every returned patch regardless of what the provider claims).
 
-import { DEFAULT_AREA_WEIGHT, ROOM_PROGRAM_MIN_DIMENSIONS, type Patch, type PatchOp, type RoomProgram } from "../types.js";
+import {
+  DEFAULT_AREA_WEIGHT,
+  ROOM_PROGRAM_MIN_DIMENSIONS,
+  type Patch,
+  type PatchOp,
+  type RoomProgram,
+  type SpatialDirection,
+} from "../types.js";
+
+export const SPATIAL_DIRECTIONS: readonly SpatialDirection[] = ["left", "right", "above", "below", "inside"];
 
 export const CORE_PATCH_OPS = [
   "addRoom",
@@ -67,12 +76,18 @@ function validateOp(raw: unknown, allowed: ReadonlySet<string>): PatchOp | strin
       if (o.name !== undefined && typeof o.name !== "string") return "addRoom: name must be a string";
       if (o.adjacentTo !== undefined && typeof o.adjacentTo !== "string") return "addRoom: adjacentTo must be a string";
       if (o.roomId !== undefined && typeof o.roomId !== "string") return "addRoom: roomId must be a string";
+      if (o.direction !== undefined && !SPATIAL_DIRECTIONS.includes(o.direction as SpatialDirection)) {
+        return `addRoom: unknown direction '${String(o.direction)}'`;
+      }
+      // A direction without something to be relative to places nothing, so it is dropped
+      // rather than failing the op — the room still gets added, just wherever it fits.
       return {
         op: "addRoom",
         program: o.program as RoomProgram,
         areaWeight,
         name: o.name as string | undefined,
         adjacentTo: o.adjacentTo as string | undefined,
+        direction: o.adjacentTo ? (o.direction as SpatialDirection | undefined) : undefined,
         roomId: o.roomId as string | undefined,
       };
     }
@@ -100,8 +115,8 @@ function validateOp(raw: unknown, allowed: ReadonlySet<string>): PatchOp | strin
     }
     case "moveRoom": {
       if (!isNonEmptyString(o.roomId) || !isNonEmptyString(o.relativeTo)) return "moveRoom: roomId and relativeTo are required";
-      if (!["left", "right", "above", "below"].includes(o.direction as string)) return "moveRoom: invalid direction";
-      return { op: "moveRoom", roomId: o.roomId, relativeTo: o.relativeTo, direction: o.direction as "left" | "right" | "above" | "below" };
+      if (!SPATIAL_DIRECTIONS.includes(o.direction as SpatialDirection)) return "moveRoom: invalid direction";
+      return { op: "moveRoom", roomId: o.roomId, relativeTo: o.relativeTo, direction: o.direction as SpatialDirection };
     }
     case "setSplit": {
       if (!Array.isArray(o.nodePath) || !o.nodePath.every((n) => typeof n === "number")) {
@@ -192,6 +207,7 @@ export function buildPatchJsonSchema(allowedOps: readonly string[]): Record<stri
         name: { type: "string" },
         areaWeight: { type: "number" },
         adjacentTo: { type: "string" },
+        direction: { type: "string", enum: SPATIAL_DIRECTIONS },
       },
       required: ["op", "program"],
     },
