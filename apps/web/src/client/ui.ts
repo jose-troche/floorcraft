@@ -6,15 +6,24 @@ import {
   PROGRAM_COLORS,
   ROOM_PROGRAM_MIN_DIMENSIONS,
   activeLevel,
+  exportDxf,
   exportJson,
+  exportPdf,
   formatLength,
+  planOpeningRotate,
   renderSvg,
+  sideOfRoom,
+  type OpeningKind,
+  type PaperSize,
   type PatchOp,
   type RoomProgram,
+  type RoomSide,
   type Units,
 } from "@floorcraft/core";
 import type { PlanStore } from "./store";
 import type { ProviderManager } from "./providers";
+import { CanvasView } from "./canvas";
+import type { SyncStatus } from "./sync";
 
 type Tab = "chat" | "manual";
 
@@ -33,14 +42,35 @@ export class AppUI {
   private error: string | null = null;
   private chatBusy = false;
   private pendingLabel: string | null = null;
+  private paperSize: PaperSize = "A4";
+  private shareLinks: { readOnly: string; edit: string } | null = null;
+  /**
+   * Built once and re-parented on every render. The canvas holds live gesture state and
+   * a pan/zoom position; rebuilding it per render would drop a drag mid-flight.
+   */
+  private canvas: CanvasView;
 
   constructor(
     private root: HTMLElement,
     private store: PlanStore,
     private providers: ProviderManager,
   ) {
-    this.store.subscribe(() => this.render());
+    this.canvas = new CanvasView(this.store, {
+      onMessage: (message) => this.setCanvasMessage(message),
+      isReadOnly: () => this.store.readOnly,
+    });
+    this.store.subscribe(() => {
+      this.canvas.update();
+      this.render();
+    });
     this.providers.subscribe(() => this.render());
+  }
+
+  /** Canvas feedback (a refused drag) is shown in the same banner as everything else. */
+  private setCanvasMessage(message: string | null): void {
+    if (this.error === message) return;
+    this.error = message;
+    this.renderBanner();
   }
 
   render(): void {
@@ -56,6 +86,25 @@ export class AppUI {
     main.appendChild(this.renderLeftPanel(providerState));
     main.appendChild(this.renderRightPanel(level, doc.units));
     this.root.appendChild(main);
+  }
+
+  /** Updates just the error banner, so a rejected drag doesn't rebuild the whole page. */
+  private renderBanner(): void {
+    const existing = this.root.querySelector(".error-banner");
+    const panel = this.root.querySelector(".tab-panel");
+    if (!panel) return;
+    if (!this.error) {
+      existing?.remove();
+      return;
+    }
+    if (existing) {
+      existing.textContent = this.error;
+      return;
+    }
+    const banner = document.createElement("div");
+    banner.className = "error-banner";
+    banner.textContent = this.error;
+    panel.insertBefore(banner, panel.firstChild);
   }
 
   // ---------------------------------------------------------------- header
@@ -264,8 +313,160 @@ export class AppUI {
     wrap.appendChild(this.renderUnitsToggle(doc.units));
     wrap.appendChild(this.renderAddRoomForm());
     wrap.appendChild(this.renderRoomList());
+    wrap.appendChild(this.renderOpeningsForm());
 
     return wrap;
+  }
+
+  /**
+   * Doors and windows from buttons rather than the canvas. RTE-4 makes this a release
+   * blocker, not a convenience: with no inference available every edit must still be
+   * reachable, and openings are a Phase 2 edit like any other.
+   */
+  private renderOpeningsForm(): HTMLElement {
+    const fs = document.createElement("fieldset");
+    const legend = document.createElement("legend");
+    legend.textContent = "Doors and windows";
+    fs.appendChild(legend);
+
+    const level = activeLevel(this.store.doc);
+    const rooms = Object.entries(level.graph.rooms);
+    if (rooms.length === 0) {
+      const p = document.createElement("p");
+      p.textContent = "Add rooms first — an opening needs a wall to sit in.";
+      fs.appendChild(p);
+      return fs;
+    }
+
+    const roomSelect = (label: string) => {
+      const wrapper = document.createElement("label");
+      wrapper.textContent = label;
+      const select = document.createElement("select");
+      for (const [roomId, room] of rooms) {
+        const opt = document.createElement("option");
+        opt.value = roomId;
+        opt.textContent = room.name;
+        select.appendChild(opt);
+      }
+      wrapper.appendChild(select);
+      fs.appendChild(wrapper);
+      return select;
+    };
+
+    const kindLabel = document.createElement("label");
+    kindLabel.textContent = "Kind";
+    const kindSelect = document.createElement("select");
+    for (const kind of ["door", "window", "cased", "pass-through"] as OpeningKind[]) {
+      const opt = document.createElement("option");
+      opt.value = kind;
+      opt.textContent = kind;
+      kindSelect.appendChild(opt);
+    }
+    kindLabel.appendChild(kindSelect);
+    fs.appendChild(kindLabel);
+
+    const placementLabel = document.createElement("label");
+    placementLabel.textContent = "Place in";
+    const placement = document.createElement("select");
+    for (const [value, text] of [
+      ["between", "the wall between two rooms"],
+      ["exterior", "an outside wall of one room"],
+    ] as const) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = text;
+      placement.appendChild(opt);
+    }
+    placementLabel.appendChild(placement);
+    fs.appendChild(placementLabel);
+
+    const roomA = roomSelect("Room");
+    const roomB = roomSelect("Adjoining room");
+    const sideLabel = document.createElement("label");
+    sideLabel.textContent = "Outside wall";
+    const sideSelect = document.createElement("select");
+    for (const side of ["top", "right", "bottom", "left"] as RoomSide[]) {
+      const opt = document.createElement("option");
+      opt.value = side;
+      opt.textContent = side;
+      sideSelect.appendChild(opt);
+    }
+    sideLabel.appendChild(sideSelect);
+    fs.appendChild(sideLabel);
+
+    const syncPlacement = () => {
+      const between = placement.value === "between";
+      roomB.parentElement!.style.display = between ? "" : "none";
+      sideLabel.style.display = between ? "none" : "";
+    };
+    placement.onchange = syncPlacement;
+    syncPlacement();
+
+    const add = document.createElement("button");
+    add.className = "primary";
+    add.textContent = "Add opening";
+    add.onclick = () => {
+      const kind = kindSelect.value as OpeningKind;
+      if (placement.value === "between") {
+        if (roomA.value === roomB.value) {
+          this.error = "Pick two different rooms — an opening needs a wall between them.";
+          this.render();
+          return;
+        }
+        void this.runManual([{ op: "addOpening", betweenRooms: [roomA.value, roomB.value], kind }]);
+        return;
+      }
+      const side = sideSelect.value as RoomSide;
+      const room = level.graph.rooms[roomA.value];
+      const edgeId = room?.boundary.find(
+        (id) => level.graph.edges[id]?.type === "exterior" && sideOfRoom(level.graph, roomA.value, id) === side,
+      );
+      if (!edgeId) {
+        this.error = `${room?.name ?? "That room"} has no outside wall on the ${side}.`;
+        this.render();
+        return;
+      }
+      void this.runManual([{ op: "addOpening", edgeId, kind }]);
+    };
+    fs.appendChild(add);
+
+    for (const opening of level.openings ?? []) {
+      const row = document.createElement("div");
+      row.className = "room-row";
+      const name = document.createElement("span");
+      name.className = "name";
+      const where =
+        opening.anchor.kind === "between"
+          ? `${level.graph.rooms[opening.anchor.rooms[0]]?.name ?? "?"} / ${level.graph.rooms[opening.anchor.rooms[1]]?.name ?? "?"}`
+          : `${level.graph.rooms[opening.anchor.roomId]?.name ?? "?"} (${opening.anchor.side})`;
+      name.textContent = `${opening.kind}: ${where}`;
+      row.appendChild(name);
+
+      if (opening.kind !== "window") {
+        const rotate = document.createElement("button");
+        rotate.textContent = "Rotate";
+        rotate.title = "Cycle which way the door hinges and swings";
+        rotate.onclick = () => {
+          const plan = planOpeningRotate(this.store.doc, opening.id);
+          if (!plan.ok) {
+            this.error = plan.reason;
+            this.render();
+          } else {
+            void this.runManual(plan.ops);
+          }
+        };
+        row.appendChild(rotate);
+      }
+
+      const remove = document.createElement("button");
+      remove.textContent = "Remove";
+      remove.onclick = () => void this.runManual([{ op: "removeOpening", openingId: opening.id }]);
+      row.appendChild(remove);
+
+      fs.appendChild(row);
+    }
+
+    return fs;
   }
 
   private async runManual(ops: PatchOp[]): Promise<void> {
@@ -472,34 +673,146 @@ export class AppUI {
     const panel = document.createElement("div");
     panel.className = "right-panel";
 
-    const toolbar = document.createElement("div");
-    toolbar.className = "canvas-toolbar";
-
-    const exportSvgBtn = document.createElement("button");
-    exportSvgBtn.textContent = "Export SVG";
-    exportSvgBtn.onclick = () => downloadBlob(renderSvg(this.store.doc), `${this.store.doc.title || "plan"}.svg`, "image/svg+xml");
-    toolbar.appendChild(exportSvgBtn);
-
-    const exportJsonBtn = document.createElement("button");
-    exportJsonBtn.textContent = "Export JSON";
-    exportJsonBtn.onclick = () => downloadBlob(exportJson(this.store.doc), `${this.store.doc.title || "plan"}.json`, "application/json");
-    toolbar.appendChild(exportJsonBtn);
-
-    const roomCount = document.createElement("span");
-    roomCount.style.marginLeft = "auto";
-    roomCount.style.fontSize = "0.8rem";
-    roomCount.style.color = "var(--muted)";
-    roomCount.textContent = `${Object.keys(level.graph.rooms).length} room(s) · ${formatLength(level.boundary.widthMm, units)} × ${formatLength(level.boundary.depthMm, units)}`;
-    toolbar.appendChild(roomCount);
-
-    panel.appendChild(toolbar);
-
-    const canvasContainer = document.createElement("div");
-    canvasContainer.className = "canvas-container";
-    canvasContainer.innerHTML = renderSvg(this.store.doc, { targetWidthPx: 900 });
-    panel.appendChild(canvasContainer);
+    panel.appendChild(this.renderCanvasToolbar(level, units));
+    if (this.shareLinks) panel.appendChild(this.renderSharePanel(this.shareLinks));
+    if (this.store.readOnlyMessage) {
+      const banner = document.createElement("div");
+      banner.className = "readonly-banner";
+      banner.textContent = this.store.readOnlyMessage;
+      panel.appendChild(banner);
+    }
+    panel.appendChild(this.canvas.element);
+    this.canvas.afterReparent();
 
     return panel;
+  }
+
+  private renderCanvasToolbar(level: ReturnType<typeof activeLevel>, units: Units): HTMLElement {
+    const toolbar = document.createElement("div");
+    toolbar.className = "canvas-toolbar";
+    const title = this.store.doc.title || "plan";
+
+    const addButton = (label: string, onClick: () => void, className?: string) => {
+      const btn = document.createElement("button");
+      btn.textContent = label;
+      if (className) btn.className = className;
+      btn.onclick = onClick;
+      toolbar.appendChild(btn);
+      return btn;
+    };
+
+    addButton("SVG", () => downloadBlob(renderSvg(this.store.doc), `${title}.svg`, "image/svg+xml"));
+    // FR-19: DXF is the way into DWG-native tools; .dwg itself is never offered.
+    const dxf = addButton("DXF", () => downloadBlob(exportDxf(this.store.doc), `${title}.dxf`, "application/dxf"));
+    dxf.title = "DXF R12 — imports into LibreCAD, QCAD, AutoCAD and SketchUp (and is the route into DWG tools)";
+    addButton("PDF", () =>
+      downloadBlob(exportPdf(this.store.doc, { paperSize: this.paperSize }), `${title}.pdf`, "application/pdf"),
+    );
+
+    const paper = document.createElement("select");
+    paper.setAttribute("aria-label", "PDF paper size");
+    for (const size of ["A4", "A3", "Letter", "Tabloid"] as PaperSize[]) {
+      const opt = document.createElement("option");
+      opt.value = size;
+      opt.textContent = size;
+      paper.appendChild(opt);
+    }
+    paper.value = this.paperSize;
+    paper.onchange = () => {
+      this.paperSize = paper.value as PaperSize;
+    };
+    toolbar.appendChild(paper);
+
+    addButton("JSON", () => downloadBlob(exportJson(this.store.doc), `${title}.json`, "application/json"));
+
+    const sync = this.store.getSync();
+    if (sync?.enabled) {
+      const share = addButton("Share…", () => void this.createShareLinks());
+      share.title = "Save to the cloud and create a link";
+    }
+
+    const status = document.createElement("span");
+    status.className = "canvas-status";
+    const syncText = sync?.enabled ? describeSync(sync.getStatus()) : "Saved on this device";
+    status.textContent =
+      `${Object.keys(level.graph.rooms).length} room(s) · ` +
+      `${formatLength(level.boundary.widthMm, units)} × ${formatLength(level.boundary.depthMm, units)} · ${syncText}`;
+    toolbar.appendChild(status);
+
+    return toolbar;
+  }
+
+  private async createShareLinks(): Promise<void> {
+    const sync = this.store.getSync();
+    if (!sync) return;
+    try {
+      this.shareLinks = await sync.shareLinks();
+      this.error = null;
+    } catch (e) {
+      this.error = `Could not create a share link: ${(e as Error).message}`;
+    }
+    this.render();
+  }
+
+  /** FR-14: the read-only link is the one on offer; the edit link is a deliberate second step. */
+  private renderSharePanel(links: { readOnly: string; edit: string }): HTMLElement {
+    const panel = document.createElement("div");
+    panel.className = "share-panel";
+
+    const row = (label: string, url: string, note: string) => {
+      const wrap = document.createElement("div");
+      wrap.className = "share-row";
+      const heading = document.createElement("strong");
+      heading.textContent = label;
+      wrap.appendChild(heading);
+      const input = document.createElement("input");
+      input.type = "text";
+      input.readOnly = true;
+      input.value = url;
+      input.onfocus = () => input.select();
+      wrap.appendChild(input);
+      const copy = document.createElement("button");
+      copy.textContent = "Copy";
+      copy.onclick = () => {
+        void navigator.clipboard?.writeText(url);
+        copy.textContent = "Copied";
+      };
+      wrap.appendChild(copy);
+      const hint = document.createElement("small");
+      hint.textContent = note;
+      wrap.appendChild(hint);
+      panel.appendChild(wrap);
+    };
+
+    row("View-only link", links.readOnly, "Anyone with this link can view and export, but not edit.");
+    row("Edit link", links.edit, "Anyone with this link can change the plan. Share it deliberately.");
+
+    const close = document.createElement("button");
+    close.textContent = "Done";
+    close.onclick = () => {
+      this.shareLinks = null;
+      this.render();
+    };
+    panel.appendChild(close);
+
+    return panel;
+  }
+}
+
+function describeSync(status: SyncStatus): string {
+  switch (status.state) {
+    case "off":
+      return "Saved on this device";
+    case "pending":
+      return "Saving soon…";
+    case "saving":
+      return "Saving…";
+    case "saved":
+      return "Saved to the cloud";
+    case "error":
+      return `Cloud save failed (${status.message}) — your plan is safe on this device`;
+    default:
+      return "Saved on this device";
   }
 }
 
@@ -508,8 +821,9 @@ function findWeight(tree: import("@floorcraft/core").SlicingTree, roomId: string
   return findWeight(tree.children[0], roomId) ?? findWeight(tree.children[1], roomId);
 }
 
-function downloadBlob(content: string, filename: string, type: string): void {
-  const blob = new Blob([content], { type });
+/** FR-16: every export is a client-side Blob — no server round-trip, works offline. */
+function downloadBlob(content: string | Uint8Array, filename: string, type: string): void {
+  const blob = new Blob([content as BlobPart], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

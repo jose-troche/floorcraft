@@ -312,3 +312,121 @@ fieldset input, fieldset select {
   font-size: 0.85rem;
   margin-bottom: 0.5rem;
 }
+
+/* ---------------------------------------------------------------- canvas */
+
+.canvas-shell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+}
+
+.canvas-view-controls {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.35rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+.canvas-view-controls button {
+  min-width: 2.2rem;
+}
+
+.canvas-container {
+  position: relative;
+  outline: none;
+}
+.canvas-container:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.canvas-container svg {
+  width: 100%;
+  height: auto;
+  max-height: 100%;
+  border: 1px solid var(--border);
+  background: #fff;
+  /* Pointer gestures own the surface; without this a drag scrolls the page on touch. */
+  touch-action: none;
+}
+
+/* Direct-manipulation affordances (FR-7). The hit targets themselves are transparent
+   and sized for touch (FR-9) — these rules only set the cursor and focus ring. */
+.fc-wall-grab {
+  cursor: grab;
+}
+.fc-opening-grab {
+  cursor: grab;
+}
+.fc-label-grab {
+  cursor: move;
+}
+.fc-boundary-handle {
+  cursor: nwse-resize;
+}
+.fc-wall-grab:focus-visible,
+.fc-opening-grab:focus-visible,
+.fc-label-grab:focus-visible,
+.fc-boundary-handle:focus-visible {
+  outline: none;
+  stroke: var(--accent);
+  stroke-opacity: 0.5;
+}
+
+.inline-rename {
+  position: absolute;
+  width: 10rem;
+  padding: 0.2rem 0.35rem;
+  font-size: 0.85rem;
+  border: 2px solid var(--accent);
+  border-radius: 0.25rem;
+  background: var(--bg);
+  color: var(--fg);
+  z-index: 5;
+}
+
+.canvas-status {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* ---------------------------------------------------- sharing and read-only */
+
+.share-panel {
+  border-bottom: 1px solid var(--border);
+  padding: 0.6rem 0.75rem;
+  background: var(--panel-bg);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.share-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.4rem;
+  align-items: center;
+}
+.share-row input {
+  width: 100%;
+  font-size: 0.8rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 0.3rem;
+  background: var(--bg);
+}
+.share-row small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.readonly-banner {
+  padding: 0.45rem 0.75rem;
+  font-size: 0.85rem;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+}
