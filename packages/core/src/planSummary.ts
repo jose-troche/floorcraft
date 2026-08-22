@@ -1,7 +1,7 @@
 // Compact digest sent to providers — specs.md §5.1 (INF-2). Never includes the wall
 // graph; must fit in ~600 tokens for a 20-room level (roughly 4 chars/token).
 
-import type { PlanDocument, PlanSummary, RoomId } from "./types.js";
+import { generatorTree, type PlanDocument, type PlanSummary, type RoomId } from "./types.js";
 import { activeLevel } from "./patch.js";
 import { polygonFromBoundary } from "./wallGraph.js";
 
@@ -66,7 +66,8 @@ export function buildPlanSummary(doc: PlanDocument): PlanSummary {
     boundary: level.boundary,
     rooms,
     adjacencies: adjacentPairs(graph),
-    generatorTree: level.generator?.tree ?? null,
+    mode: level.generator?.kind === "freeform" ? "freeform" : "slicing",
+    generatorTree: generatorTree(level) ?? null,
   };
 }
 

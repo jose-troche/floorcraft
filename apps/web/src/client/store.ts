@@ -6,6 +6,7 @@ import {
   applyPatch,
   createEmptyPlan,
   formatAppliedTurn,
+  normalizeDocument,
   resolveTurn,
   type Patch,
   type PatchOp,
@@ -87,6 +88,9 @@ export class PlanStore {
     let record: StoredRecord | undefined;
     if (meta?.lastPlanId) {
       record = await idbGet<StoredRecord>(db, PLAN_STORE, meta.lastPlanId);
+      // IndexedDB documents don't go through importJson's migration pass — normalize
+      // here so a document written before Phase 3's Generator shape change still loads.
+      if (record) record = { ...record, doc: normalizeDocument(record.doc) };
     }
     if (!record) {
       const id = crypto.randomUUID();
@@ -112,7 +116,9 @@ export class PlanStore {
   async adoptShared(input: { doc: PlanDocument; access: "read" | "edit"; id: string; token: string }): Promise<void> {
     this.record = {
       id: input.doc.id,
-      doc: input.doc,
+      // Normalized again here (sync.ts's importJson already does it) so this method
+      // stays safe to call from anywhere, not just its current one caller.
+      doc: normalizeDocument(input.doc),
       chatHistory: [],
       undoStack: [],
       redoStack: [],

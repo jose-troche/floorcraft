@@ -21,6 +21,9 @@ const OP_DOCS: Record<OpName, string> = {
   setDimension: `setDimension {roomId, dimensionType: "width"|"depth"|"area"|"aspectRatio", value, unit?} — pin an exact dimension.`,
   clearDimension: `clearDimension {roomId, dimensionType} — remove a pinned dimension.`,
   setDimensionRange: `setDimensionRange {roomId, dimensionType, minMm?, maxMm?} — bound a dimension by range.`,
+  addLevel: `addLevel {name?, copyFromLevelId?} — add a new storey and switch to it; copyFromLevelId starts it from another level's layout.`,
+  setActiveLevel: `setActiveLevel {levelId} — switch which storey subsequent ops in this patch and the canvas apply to.`,
+  renameLevel: `renameLevel {levelId, name} — rename a storey.`,
 };
 
 export function buildSystemPrompt(allowedOps: readonly OpName[]): string {

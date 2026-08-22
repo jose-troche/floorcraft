@@ -40,7 +40,9 @@ describe("buildWallGraph", () => {
     bl: { name: "Bottom Left", program: "kitchen" as const },
     br: { name: "Bottom Right", program: "bath" as const },
   };
-  const graph = buildWallGraph(solved.leaves, boundary, roomMeta);
+  const built = buildWallGraph(solved.leaves, boundary, roomMeta);
+  if (!built.ok) throw new Error("fixture graph should build");
+  const graph = built.graph;
 
   it("gives every room a closed polygon whose area matches its solved rectangle", () => {
     for (const leaf of solved.leaves) {

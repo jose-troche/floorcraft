@@ -3,11 +3,11 @@
 // area rooms (SLV-1), enforcing per-program minimum dimensions and grid-snapped
 // centerlines (SLV-2 required tiers). Unsatisfiable minimums fail structured (SLV-3).
 
-import type { NodePath, RoomId, SlicingTree, SolveViolation } from "./types.js";
+import type { NodePath, Rect, RoomId, SlicingTree, SolveViolation } from "./types.js";
 import { ROOM_PROGRAM_MIN_DIMENSIONS } from "./types.js";
 
-export type Rect = { x: number; y: number; w: number; d: number };
-
+// Rect itself lives in types.ts (RoomCell reuses it for the freeform generator); not
+// re-exported here too, since index.ts's `export *` from both modules would collide.
 export type LeafRect = Rect & { roomId: RoomId; path: NodePath };
 
 /**

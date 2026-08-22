@@ -3,6 +3,7 @@
 // Migrations for older minor versions register here (DM-3).
 
 import { SCHEMA_VERSION, type PlanDocument } from "./types.js";
+import { normalizeDocument } from "./migrate.js";
 
 export function exportJson(doc: PlanDocument): string {
   return JSON.stringify(doc, null, 2);
@@ -49,5 +50,5 @@ export function importJson(text: string): ImportResult {
     return { ok: false, error: "Document is missing required fields" };
   }
 
-  return { ok: true, doc: migrated as PlanDocument };
+  return { ok: true, doc: normalizeDocument(migrated as PlanDocument) };
 }

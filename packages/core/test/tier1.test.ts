@@ -15,6 +15,7 @@ function summary(): PlanSummary {
     boundary: { widthMm: 9144, depthMm: 12192 },
     rooms: [],
     adjacencies: [],
+    mode: "slicing",
     generatorTree: null,
   };
 }

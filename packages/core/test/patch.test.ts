@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { activeLevel, applyPatch, createEmptyPlan } from "../src/patch.js";
-import type { Patch } from "../src/types.js";
+import { generatorTree, type Patch } from "../src/types.js";
 
 function basePlan() {
   return createEmptyPlan({ id: "p1", title: "Test Plan", units: "imperial", boundary: { widthMm: 9144, depthMm: 12192 } });
@@ -17,7 +17,7 @@ describe("applyPatch", () => {
     const doc = basePlan();
     const { doc: doc1 } = apply(doc, [{ op: "addRoom", roomId: "kitchen", program: "kitchen", areaWeight: 1 }]);
     const level = activeLevel(doc1);
-    expect(level.generator?.tree).toMatchObject({ kind: "leaf", roomId: "kitchen" });
+    expect(generatorTree(level)).toMatchObject({ kind: "leaf", roomId: "kitchen" });
     expect(Object.keys(level.graph.rooms)).toEqual(["kitchen"]);
     const room = level.graph.rooms.kitchen!;
     expect(room.boundary.length).toBeGreaterThanOrEqual(4);
@@ -37,7 +37,7 @@ describe("applyPatch", () => {
     ({ doc: d } = apply(d, [{ op: "addRoom", roomId: "living", program: "living", areaWeight: 1 }]));
     ({ doc: d } = apply(d, [{ op: "removeRoom", roomId: "living" }]));
     const level = activeLevel(d);
-    expect(level.generator?.tree).toMatchObject({ kind: "leaf", roomId: "kitchen" });
+    expect(generatorTree(level)).toMatchObject({ kind: "leaf", roomId: "kitchen" });
     expect(Object.keys(level.graph.rooms)).toEqual(["kitchen"]);
   });
 

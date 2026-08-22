@@ -6,11 +6,12 @@ import {
   PROGRAM_COLORS,
   ROOM_PROGRAM_MIN_DIMENSIONS,
   activeLevel,
-  exportDxf,
+  checkStairAlignment,
   exportJson,
-  exportPdf,
   formatLength,
+  generatorTree,
   planOpeningRotate,
+  planStairAlignmentOnActiveLevel,
   renderSvg,
   sideOfRoom,
   type OpeningKind,
@@ -21,7 +22,9 @@ import {
   type Units,
 } from "@floorcraft/core";
 import type { PlanStore } from "./store";
-import type { ProviderManager } from "./providers";
+import type { ProviderId, ProviderManager } from "./providers";
+import * as openrouterAuth from "./openrouterAuth";
+import { clearByokKey, getByokKey, setByokKey, type Tier3Vendor } from "./byokKeys";
 import { CanvasView } from "./canvas";
 import type { SyncStatus } from "./sync";
 
@@ -32,9 +35,11 @@ type Tab = "chat" | "manual";
  * architectural label, not something to put in front of someone drawing a floor plan —
  * what they care about is where the work happens and whether it's private to them.
  */
-const TIER_NAMES: Record<"tier0-on-device" | "tier1-hosted", { badge: string; sentence: string; option: string }> = {
+const TIER_NAMES: Record<ProviderId, { badge: string; sentence: string; option: string }> = {
   "tier0-on-device": { badge: "On-device AI", sentence: "the AI on your device", option: "On-device AI (private, no network)" },
   "tier1-hosted": { badge: "Cloud AI", sentence: "the cloud AI", option: "Cloud AI (shared free pool)" },
+  "tier2-openrouter": { badge: "OpenRouter", sentence: "your connected OpenRouter account", option: "OpenRouter (your account)" },
+  "tier3-byok": { badge: "Your API key", sentence: "your own API key", option: "Your own API key" },
 };
 
 export class AppUI {
@@ -46,6 +51,12 @@ export class AppUI {
   private shareLinks: { readOnly: string; edit: string } | null = null;
   /** Options from the last clarifying question, offered as one-tap answers (FR-5). */
   private clarifyOptions: string[] | null = null;
+  /** Whether the inline "connect your own key" form (Tier 3) is expanded. */
+  private byokFormOpen = false;
+  private byokVendor: Tier3Vendor = "anthropic";
+  /** RTE-3: quota exhaustion is explicit and must be acknowledged, not silently retried —
+   * dismissing just hides the banner for this session, it doesn't change the tier. */
+  private quotaBannerDismissed = false;
   /**
    * Built once and re-parented on every render. The canvas holds live gesture state and
    * a pan/zoom position; rebuilding it per render would drop a drag mid-flight.
@@ -82,12 +93,34 @@ export class AppUI {
 
     this.root.innerHTML = "";
     this.root.appendChild(this.renderHeader(providerState));
+    if (providerState.tier1Availability === "exhausted" && !this.quotaBannerDismissed) {
+      this.root.appendChild(this.renderQuotaExhaustedBanner());
+    }
 
     const main = document.createElement("main");
     main.className = "layout";
     main.appendChild(this.renderLeftPanel(providerState));
     main.appendChild(this.renderRightPanel(level, doc.units));
     this.root.appendChild(main);
+  }
+
+  /** RTE-3: the hosted free pool being exhausted (per-client quota or the global daily
+   * budget) is surfaced explicitly rather than just silently failing turns, with the
+   * Tier 2/3 upgrade path one click away. */
+  private renderQuotaExhaustedBanner(): HTMLElement {
+    const banner = document.createElement("div");
+    banner.className = "quota-banner";
+    const text = document.createElement("span");
+    text.textContent = "The free cloud AI pool is exhausted for now — connect OpenRouter or your own API key to keep chatting, or keep editing manually.";
+    banner.appendChild(text);
+    const dismiss = document.createElement("button");
+    dismiss.textContent = "Dismiss";
+    dismiss.onclick = () => {
+      this.quotaBannerDismissed = true;
+      this.render();
+    };
+    banner.appendChild(dismiss);
+    return banner;
   }
 
   /** Updates just the error banner, so a rejected drag doesn't rebuild the whole page. */
@@ -119,6 +152,8 @@ export class AppUI {
     h1.textContent = "Floorcraft";
     header.appendChild(h1);
 
+    header.appendChild(this.renderLevelSwitcher());
+
     const badge = document.createElement("span");
     badge.className = "tier-badge";
     const tierText = providerState.activeId ? TIER_NAMES[providerState.activeId].badge : "Manual editing only";
@@ -135,12 +170,12 @@ export class AppUI {
 
     const tierSelect = document.createElement("select");
     tierSelect.setAttribute("aria-label", "Inference tier");
-    const options: Array<[string, string]> = [
-      ["auto", "Automatic"],
-      ["tier0-on-device", TIER_NAMES["tier0-on-device"].option],
-      ["tier1-hosted", TIER_NAMES["tier1-hosted"].option],
-      ["none", "Manual editing only"],
-    ];
+    const options: Array<[string, string]> = [["auto", "Automatic"], ["tier0-on-device", TIER_NAMES["tier0-on-device"].option], ["tier1-hosted", TIER_NAMES["tier1-hosted"].option]];
+    // Tier 2/3 are opt-in (RTE-1 never auto-selects them) and only worth offering once
+    // actually connected — an entry for a tier with no key would just error on selection.
+    if (providerState.tier2Availability === "available") options.push(["tier2-openrouter", TIER_NAMES["tier2-openrouter"].option]);
+    if (providerState.tier3Availability === "available") options.push(["tier3-byok", TIER_NAMES["tier3-byok"].option]);
+    options.push(["none", "Manual editing only"]);
     for (const [value, label] of options) {
       const opt = document.createElement("option");
       opt.value = value;
@@ -151,10 +186,12 @@ export class AppUI {
     tierSelect.onchange = () => {
       if (tierSelect.value === "auto") this.providers.autoSelect();
       else if (tierSelect.value === "none") this.providers.setActive(null);
-      else this.providers.setActive(tierSelect.value as "tier0-on-device" | "tier1-hosted");
+      else this.providers.setActive(tierSelect.value as ProviderId);
       this.store.setProvider(this.providers.getActiveProvider());
     };
     header.appendChild(tierSelect);
+
+    header.appendChild(this.renderTierConnections(providerState));
 
     header.appendChild(this.spacer());
 
@@ -171,6 +208,153 @@ export class AppUI {
     header.appendChild(redoBtn);
 
     return header;
+  }
+
+  /** Multi-storey level switcher (Phase 3) — always rendered, even for a single level, so
+   * "+" for a second floor is discoverable without a separate menu. */
+  private renderLevelSwitcher(): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "level-switcher";
+    const doc = this.store.doc;
+    const levels = [...doc.levels].sort((a, b) => a.elevation - b.elevation);
+
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", "Active level");
+    for (const level of levels) {
+      const opt = document.createElement("option");
+      opt.value = level.id;
+      opt.textContent = level.name;
+      select.appendChild(opt);
+    }
+    select.value = doc.activeLevelId;
+    select.onchange = () => void this.runManual([{ op: "setActiveLevel", levelId: select.value }]);
+    wrap.appendChild(select);
+
+    const renameBtn = document.createElement("button");
+    renameBtn.textContent = "✎";
+    renameBtn.title = "Rename level";
+    renameBtn.setAttribute("aria-label", "Rename level");
+    renameBtn.onclick = () => {
+      const current = activeLevel(doc);
+      const name = window.prompt("Level name", current.name);
+      if (name && name.trim()) void this.runManual([{ op: "renameLevel", levelId: current.id, name: name.trim() }]);
+    };
+    wrap.appendChild(renameBtn);
+
+    const addBtn = document.createElement("button");
+    addBtn.textContent = "+";
+    addBtn.title = "Add a level";
+    addBtn.setAttribute("aria-label", "Add a level");
+    addBtn.onclick = () => {
+      const name = window.prompt("New level name", `Level ${levels.length + 1}`);
+      if (name === null) return;
+      void this.runManual([{ op: "addLevel", name: name.trim() || undefined }]);
+    };
+    wrap.appendChild(addBtn);
+
+    if (levels.length > 1) {
+      const removeBtn = document.createElement("button");
+      removeBtn.textContent = "Delete level";
+      removeBtn.onclick = () => {
+        const current = activeLevel(doc);
+        if (window.confirm(`Delete "${current.name}" and everything on it?`)) {
+          void this.runManual([{ op: "removeLevel", levelId: current.id }]);
+        }
+      };
+      wrap.appendChild(removeBtn);
+    }
+
+    return wrap;
+  }
+
+  /** Connect/disconnect controls for Tier 2 (OpenRouter) and Tier 3 (BYOK) — specs.md
+   * T2-1/T2-2, T3-1/T3-2. Both start disconnected; connecting either is always an
+   * explicit click, never automatic (RTE-1 doesn't route to them). */
+  private renderTierConnections(providerState: ReturnType<ProviderManager["getState"]>): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "tier-connections";
+
+    if (providerState.tier2Availability === "available") {
+      const disconnect = document.createElement("button");
+      disconnect.textContent = "Disconnect OpenRouter";
+      disconnect.onclick = () => {
+        openrouterAuth.disconnect();
+        void this.providers.refreshConnections().then(() => this.render());
+      };
+      wrap.appendChild(disconnect);
+    } else {
+      const connect = document.createElement("button");
+      connect.textContent = "Connect OpenRouter…";
+      connect.onclick = () => {
+        // T2-2: the spend risk is stated at the point of connection, not buried in settings.
+        const ok = window.confirm(
+          "This connects your OpenRouter account. Floorcraft will use it to run chat requests, " +
+            "which can spend your OpenRouter credits (a free-tier model is used by default). Continue?",
+        );
+        if (ok) void openrouterAuth.beginConnect();
+      };
+      wrap.appendChild(connect);
+    }
+
+    if (providerState.tier3Availability === "available" && providerState.tier3Vendor) {
+      const vendor = providerState.tier3Vendor;
+      const forget = document.createElement("button");
+      forget.textContent = `Forget ${vendor} key`;
+      forget.onclick = () => {
+        clearByokKey(vendor);
+        void this.providers.refreshConnections().then(() => this.render());
+      };
+      wrap.appendChild(forget);
+    } else {
+      const toggle = document.createElement("button");
+      toggle.textContent = this.byokFormOpen ? "Cancel" : "Use your own API key…";
+      toggle.onclick = () => {
+        this.byokFormOpen = !this.byokFormOpen;
+        this.render();
+      };
+      wrap.appendChild(toggle);
+
+      if (this.byokFormOpen) {
+        const vendorSelect = document.createElement("select");
+        vendorSelect.setAttribute("aria-label", "API key provider");
+        const vendors: Array<[Tier3Vendor, string]> = [
+          ["anthropic", "Anthropic"],
+          ["openai", "OpenAI"],
+          ["google", "Google"],
+        ];
+        for (const [value, label] of vendors) {
+          const opt = document.createElement("option");
+          opt.value = value;
+          opt.textContent = label;
+          vendorSelect.appendChild(opt);
+        }
+        vendorSelect.value = this.byokVendor;
+        vendorSelect.onchange = () => {
+          this.byokVendor = vendorSelect.value as Tier3Vendor;
+        };
+        wrap.appendChild(vendorSelect);
+
+        const keyInput = document.createElement("input");
+        keyInput.type = "password";
+        keyInput.placeholder = "API key";
+        keyInput.setAttribute("aria-label", "API key");
+        keyInput.autocomplete = "off";
+        wrap.appendChild(keyInput);
+
+        const save = document.createElement("button");
+        save.textContent = "Connect";
+        save.onclick = () => {
+          const key = keyInput.value.trim();
+          if (!key) return;
+          setByokKey(this.byokVendor, key);
+          this.byokFormOpen = false;
+          void this.providers.refreshConnections().then(() => this.render());
+        };
+        wrap.appendChild(save);
+      }
+    }
+
+    return wrap;
   }
 
   private spacer(): HTMLElement {
@@ -684,7 +868,7 @@ export class AppUI {
 
   private async resizeByPercent(roomId: string, delta: number): Promise<void> {
     const level = activeLevel(this.store.doc);
-    const tree = level.generator?.tree;
+    const tree = generatorTree(level);
     const currentWeight = tree ? findWeight(tree, roomId) : null;
     if (currentWeight === null) return;
     await this.runManual([{ op: "resizeRoom", roomId, areaWeight: Math.max(currentWeight * (1 + delta), 0.01) }]);
@@ -725,11 +909,30 @@ export class AppUI {
     };
 
     addButton("SVG", () => downloadBlob(renderSvg(this.store.doc), `${title}.svg`, "image/svg+xml"));
-    // FR-19: DXF is the way into DWG-native tools; .dwg itself is never offered.
-    const dxf = addButton("DXF", () => downloadBlob(exportDxf(this.store.doc), `${title}.dxf`, "application/dxf"));
+    // FR-19: DXF is the way into DWG-native tools; .dwg itself is never offered. DXF, PDF,
+    // IFC and glTF are all dynamically imported (NFR-2): none of them is needed for first
+    // paint, and IFC/glTF in particular are Phase 3 additions with real code weight.
+    const dxf = addButton("DXF", () =>
+      void import("@floorcraft/core/dxfExport").then(({ exportDxf }) =>
+        downloadBlob(exportDxf(this.store.doc), `${title}.dxf`, "application/dxf"),
+      ),
+    );
     dxf.title = "DXF R12 — imports into LibreCAD, QCAD, AutoCAD and SketchUp (and is the route into DWG tools)";
     addButton("PDF", () =>
-      downloadBlob(exportPdf(this.store.doc, { paperSize: this.paperSize }), `${title}.pdf`, "application/pdf"),
+      void import("@floorcraft/core/pdfExport").then(({ exportPdf }) =>
+        downloadBlob(exportPdf(this.store.doc, { paperSize: this.paperSize }), `${title}.pdf`, "application/pdf"),
+      ),
+    );
+    const ifc = addButton("IFC", () =>
+      void import("@floorcraft/core/ifcExport").then(({ exportIfc }) =>
+        downloadBlob(exportIfc(this.store.doc), `${title}.ifc`, "application/x-step"),
+      ),
+    );
+    ifc.title = "IFC4 SPF — verify in your BIM tool before relying on it; see the README's manual smoke-test note";
+    addButton("glTF", () =>
+      void import("@floorcraft/core/gltfExport").then(({ exportGltf }) =>
+        downloadBlob(exportGltf(this.store.doc), `${title}.glb`, "model/gltf-binary"),
+      ),
     );
 
     const paper = document.createElement("select");
@@ -748,6 +951,20 @@ export class AppUI {
 
     addButton("JSON", () => downloadBlob(exportJson(this.store.doc), `${title}.json`, "application/json"));
 
+    // Detached/freeform editing (DM-2, FR-11): a level either follows the generated
+    // layout or has been detached into a direct rectangle-union, never both.
+    if (level.generator?.kind === "freeform") {
+      const restore = addButton("Restore generated layout", () => void this.runManual([{ op: "reattachGenerator" }]));
+      restore.title = "Discard freeform edits and go back to the generated layout";
+      const freeformBadge = document.createElement("span");
+      freeformBadge.className = "freeform-badge";
+      freeformBadge.textContent = "Freeform";
+      toolbar.appendChild(freeformBadge);
+    } else if (generatorTree(level)) {
+      const detach = addButton("Switch to freeform editing", () => void this.runManual([{ op: "detachGenerator" }]));
+      detach.title = "Edit walls and rooms directly, including L-shapes — chat layout commands become limited";
+    }
+
     const sync = this.store.getSync();
     if (sync?.enabled) {
       const share = addButton("Share…", () => void this.createShareLinks());
@@ -761,6 +978,29 @@ export class AppUI {
       `${Object.keys(level.graph.rooms).length} room(s) · ` +
       `${formatLength(level.boundary.widthMm, units)} × ${formatLength(level.boundary.depthMm, units)} · ${syncText}`;
     toolbar.appendChild(status);
+
+    // Stair alignment (D2): a mismatch is a warning, never a solve failure — the plan
+    // still renders, and a one-click fix is offered right next to it.
+    for (const warning of checkStairAlignment(this.store.doc)) {
+      const banner = document.createElement("div");
+      banner.className = "stair-warning";
+      banner.textContent = `⚠ ${warning.message}`;
+      if (warning.levelIds.includes(level.id)) {
+        const fix = document.createElement("button");
+        fix.textContent = "Align to neighbouring level";
+        fix.onclick = () => {
+          const plan = planStairAlignmentOnActiveLevel(this.store.doc, warning.coreName);
+          if (!plan.ok) {
+            this.error = plan.reason;
+            this.render();
+            return;
+          }
+          void this.runManual(plan.ops);
+        };
+        banner.appendChild(fix);
+      }
+      toolbar.appendChild(banner);
+    }
 
     return toolbar;
   }

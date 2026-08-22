@@ -1,4 +1,4 @@
-# Floorcraft — Phases 1 and 2
+# Floorcraft — Phases 1, 2 and 3
 
 Phase 1 ("Prove the loop") of `specs.md`: description → summary → patch →
 slicing tree → wall graph → SVG, with Tier 0 (on-device) and Tier 1 (hosted
@@ -7,16 +7,23 @@ and SVG + JSON export.
 
 Phase 2 ("Editing and interchange") adds canvas direct manipulation, doors and
 windows, deterministic dimension parsing, D1-backed persistence with share
-links, and DXF + PDF export. Still deployable on Cloudflare's free tier.
+links, and DXF + PDF export.
+
+Phase 3 ("Fidelity and Tiers 2/3") adds detached/freeform wall-graph editing
+with L-shaped rooms, multi-storey levels with stair-alignment checking, IFC4
+and glTF export, and two more inference tiers — OpenRouter (Tier 2) and
+bring-your-own-key (Tier 3). Still deployable on Cloudflare's free tier.
 
 ## Layout
 
 ```
 packages/core/   Pure TypeScript domain engine (no DOM, no network) — solver,
-                 wall graph builder, patch reducer, opening placement, drag
-                 planning, SVG renderer, DXF/PDF/JSON export, deterministic
-                 intent + dimension parsing, provider interface + Tier 0/1.
-                 Reusable outside the web UI (spec §10, MCP server, Phase ≥2).
+                 wall graph builder (rect unions + L-shapes), patch reducer,
+                 opening placement, drag planning, SVG renderer, DXF/PDF/
+                 JSON/IFC/glTF export, deterministic intent + dimension
+                 parsing, stair-alignment checking, provider interface +
+                 Tier 0/1/2/3. Reusable outside the web UI (spec §10, MCP
+                 server, Phase ≥2).
 apps/web/        Vite frontend (chat + manual editor + interactive canvas) and
                  the Cloudflare Worker (static assets, /api/config, /api/infer,
                  /api/plans).
@@ -37,6 +44,130 @@ apps/web/        Vite frontend (chat + manual editor + interactive canvas) and
 Every canvas gesture is turned into ordinary patch ops and applied through the
 same reducer as a chat turn, so direct manipulation is undoable like anything
 else (FR-3) and the language model never emits geometry (§1.2).
+
+## Phase 3 at a glance
+
+| Capability | Spec | Where |
+|---|---|---|
+| Rect-union geometry (a room as several rectangles, dissolved seams, cycle tracing) | DM-1, FR-11 | `packages/core/src/wallGraph.ts` |
+| Detached/freeform level editing — partial wall drags, L-shapes | DM-2, FR-11 | `packages/core/src/{patch,dragPlan}.ts` |
+| Multi-storey levels, ghost ready via `levels[]`, deterministic level commands | §3.2 | `packages/core/src/patch.ts` (`applyLevelManagementOps`) + `intentMatcher.ts` |
+| Stair-core alignment check + one-click best-effort fix | open question 6 | `packages/core/src/stairs.ts` |
+| IFC4 SPF export (walls, spaces, openings; project→site→building→storey) | §6.4 | `packages/core/src/ifcExport.ts` |
+| glTF (.glb) export — extruded walls and floors for 3D preview | §6.4 | `packages/core/src/gltfExport.ts` |
+| Tier 2 — OpenRouter, client-side PKCE connect | T2-1..T2-5 | `packages/core/src/providers/tier2.ts` + `apps/web/src/client/openrouterAuth.ts` |
+| Tier 3 — bring your own key (Anthropic, OpenAI, Google) | T3-1..T3-3 | `packages/core/src/providers/tier3.ts` |
+| Shared secret redaction (Worker *and* client error paths) | SEC-5, T2-3, T3-2 | `packages/core/src/redactSecrets.ts` |
+| Content-Security-Policy on API responses | SEC-4 | `apps/web/src/worker/security.ts` |
+
+### Detached/freeform editing (DM-2, FR-11)
+
+A level starts **generated**: a slicing tree drives its layout, and every room
+is a single rectangle. Clicking "Switch to freeform editing" (or dragging part
+of a wall the tree can't express) **detaches** it: the currently-solved
+rectangles are frozen into a `cells` array, and from then on the level edits
+those rectangles directly instead of the tree. Dragging a wall that only
+partly borders a room's rectangle splits that rectangle into up to three
+pieces — the part that moved and the parts that didn't — which is how an
+L-shaped room comes to exist. "Restore generated layout" discards the
+freeform edits and switches back to the tree that was frozen at detach time.
+
+A freeform level's vocabulary is deliberately smaller — `addRoom`,
+`resizeRoom`, `swapRooms`, `moveRoom`, `setSplit`, and the `setDimension*`
+family all assume a generator tree and are refused with an actionable message
+(`FREEFORM_BLOCKED_MSG` in `patch.ts`) telling you to edit the canvas
+directly or restore the generated layout instead. `removeRoom` is the
+exception: it works in both modes, leaving a void (a legitimate freeform
+shape — a courtyard) rather than an error. A provider asked about a freeform
+level gets this reduced set too (`FREEFORM_PATCH_OPS` in
+`providers/schema.ts`), so it isn't asked for restructuring it has no way to
+express.
+
+### Multi-storey (§3.2)
+
+`addLevel`, `removeLevel`, `setActiveLevel`, `renameLevel`, and
+`setLevelProps` are document-scoped: they run in their own pass
+(`applyLevelManagementOps`) **before** the rest of a patch, so
+`activeLevelId` can change mid-patch. This is what makes "add a second floor
+with two bedrooms" one turn instead of two — the room-adding ops that follow
+`addLevel` in the same patch land on the level it just created.
+`copyFromLevelId` duplicates another level's layout and room metadata (not
+its openings). Deterministic phrasing: "add a second floor", "add a floor
+called Attic", "go to the ground floor" / "switch to level 2", "rename level
+2 to Attic".
+
+### Stair-core alignment (open question 6)
+
+There's no linking step: two rooms with `program: "stair"` and the *same
+name*, on adjacent levels, are automatically one vertical run. Phase 3
+checks rather than solves this — `checkStairAlignment` intersects each
+core's footprint between adjacent levels and warns (non-blocking, surfaced as
+a banner in the canvas toolbar) when the overlap falls short of a stair's
+minimum footprint. "Align to neighbouring level" copies a freeform level's
+cells exactly, or on a generated level pins width and depth to match
+(`planStairAlignment` in `stairs.ts`) — position on a generated level may
+still need a manual nudge afterwards, which the assist's own return note says
+outright rather than implying more precision than a tree can actually give.
+
+### IFC and glTF export — verify before you trust them
+
+Both exporters are hand-written against remembered IFC4/glTF entity shapes,
+not validated against the official EXPRESS schema or a real toolchain as part
+of this build. The test suites (`ifcExport.test.ts`, `gltfExport.test.ts`)
+check structural well-formedness — every STEP `#id` reference resolves, every
+glTF accessor's byte range stays inside its buffer, triangle counts are
+sane — which catches internal corruption but does **not** prove the files are
+semantically valid IFC/glTF. Before relying on either exporter, open the
+output in:
+
+- **IFC**: IfcOpenShell/BlenderBIM, FreeCAD, and one web IFC viewer.
+- **glTF**: any three.js-based `.glb` viewer (e.g. [gltf-viewer.donmccurdy.com](https://gltf-viewer.donmccurdy.com)).
+
+IFC's opening geometry is simplified: an `IfcOpeningElement` correctly voids
+each wall via `IfcRelVoidsElement`, and doors/windows are correctly related
+via `IfcRelFillsElement`, but the door/window products themselves carry no
+geometry of their own (`Representation = $`) — a real leaf/sash model was
+judged not worth the added risk of guessing at more entity shapes from
+memory. glTF walls and floors are not CSG-clipped either — window openings
+are real geometric gaps (a below-sill box, an above-head box, nothing in
+between), but adjoining wall/floor boxes simply overlap at their seams rather
+than being merged, which is fine for a preview render and would look wrong
+under boolean-difference tooling.
+
+### Tier 2 — OpenRouter (T2-1..T2-5)
+
+Client-side PKCE: connecting redirects to `openrouter.ai/auth` and back,
+exchanges the code for a key at `POST /api/v1/auth/keys`, and stores the key
+in `localStorage` — the key never reaches this app's own server. **T2-4**
+prefers the server-side PKCE variant "if session infrastructure exists"; it
+doesn't here (the Worker has only the anonymous quota-bucket cookie, no
+login session to hold a key behind), and standing one up just for this would
+be a bigger, riskier change than the client-side flow it would replace — so
+that's what's implemented, and this is the record of the trade-off. The
+default model (`TIER2_DEFAULT_MODEL` in `providers/tier2.ts`) is a
+free-tier-eligible model hardcoded rather than fetched live from
+`/models` — a live, filtered picker is a reasonable follow-up, not yet built.
+
+### Tier 3 — bring your own key (T3-1..T3-3)
+
+Anthropic, OpenAI, or Google, one at a time, key stored in `localStorage`
+under `fc.tier3.<vendor>.key`. All three providers support browser-origin
+CORS (Anthropic via the `anthropic-dangerous-direct-browser-access` header),
+so **no pass-through proxy is built** — T3-2's proxy clause is conditional on
+CORS requiring it, and for all three it doesn't.
+
+### Content-Security-Policy (SEC-4) — known gap
+
+`apps/web/src/worker/security.ts` sets a strict CSP (naming Tier 2/3's
+provider origins in `connect-src`) on every response the Worker itself
+handles. Cloudflare serves anything matching a file under `[assets]` — the
+HTML page included — directly, bypassing the Worker by default, so today
+this header reaches `/api/*` responses only, not the page. Closing that gap
+needs `run_worker_first = true` in `wrangler.toml`, which would move asset
+traffic onto the Workers Free tier's request quota instead of the `[assets]`
+binding's unbilled/unlimited path (specs.md §8.1) — a real cost trade-off,
+left as a deliberate choice rather than made silently. See the comment in
+`security.ts` for the full reasoning.
 
 ### Commands resolved without inference (INF-5, DIM-1..DIM-6)
 
@@ -79,6 +210,19 @@ cd packages/core && UPDATE_GOLDEN=1 npx vitest run test/dxfExport.test.ts
 Review the diff, then re-run the manual import smoke test into LibreCAD, QCAD,
 AutoCAD and SketchUp — the byte comparison catches drift, not whether the four
 target applications still accept the file.
+
+### IFC golden fixture
+
+Same idea, same fixture plan, `packages/core/test/golden/plan.ifc`:
+
+```bash
+cd packages/core && UPDATE_GOLDEN=1 npx vitest run test/ifcExport.test.ts
+```
+
+The suite's reference-integrity checks (every `#id` resolves, storey/space/
+wall counts match the model) catch structural regressions the byte
+comparison alone would miss; neither substitutes for the manual viewer
+smoke-test — see "IFC and glTF export — verify before you trust them" above.
 
 ## Requirements traceability (Phase 1 exit criteria)
 
@@ -196,13 +340,28 @@ If you skip the D1 setup entirely, `/api/config` reports `cloudSyncEnabled:
 false`, the Share button disappears, and plans live in IndexedDB alone —
 editing and export are unaffected.
 
-### What's intentionally *not* here yet (Phase 3+)
+**Tiers 2 and 3 need no deployment configuration at all.** OpenRouter's PKCE
+exchange and every BYOK provider are called directly from the browser
+(T2-1, T3-3) — there's no server-side secret to provision, no binding to add.
+They're available the moment the app is deployed, gated only by the user
+choosing to connect one.
 
-- Detached wall-graph editing and L-shaped rooms (`DM-2`, `FR-11`), multi-storey
-  with stair alignment, IFC4 and glTF export — Phase 3.
-- Tier 2 (OpenRouter PKCE) / Tier 3 (BYOK) — Phase 3.
+### What's intentionally *not* here yet
+
+- **WebLLM/WebGPU as an opt-in local provider (T0-6, a SHOULD)** — deferred
+  out of Phase 3. It's a multi-hundred-megabyte dependency competing with
+  Tier 2/3 for the same "Tier 0 unavailable" slot, at meaningfully higher
+  build/test cost than either. Revisit if Tier 0 adoption data justifies it.
+- **A true cross-level stair constraint layer** — Phase 3 checks and assists
+  (see above); a solver that keeps stairs aligned automatically across every
+  edit is open question 6's harder version, deliberately not attempted here.
+- **A live, filtered OpenRouter model picker** — Tier 2 uses a hardcoded
+  free-tier-eligible default instead of fetching and filtering `/models`.
 - Raster import — Phase 4.
 - The MCP server module (spec §10) — optional, any phase ≥ 2.
 
-Phase 2 documents add an optional `levels[].openings` array. It is additive, so
-older documents load unchanged and no schema migration is needed.
+Phase 2 documents add an optional `levels[].openings` array; Phase 3 changes
+`Level.generator` from `{tree, detached?}` to a `{kind: "slicing"|"freeform",
+...}` tagged union. Both are handled by `normalizeDocument()`
+(`packages/core/src/migrate.ts`), called on every document load path — IndexedDB,
+share links, and JSON import — so an older document loads unchanged.

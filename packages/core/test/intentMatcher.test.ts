@@ -70,4 +70,51 @@ describe("matchDeterministicIntent", () => {
     const result = matchDeterministicIntent(doc, "A 30x40 foot house with kitchen, living room, 2 bedrooms, 1 bath");
     expect(result).toBeNull();
   });
+
+  it("matches adding a floor, with and without a name", () => {
+    const r1 = matchDeterministicIntent(planWithRooms(), "add a second floor");
+    expect(r1?.kind).toBe("patch");
+    if (r1?.kind !== "patch") return;
+    expect(r1.patch.ops[0]).toMatchObject({ op: "addLevel" });
+
+    const r2 = matchDeterministicIntent(planWithRooms(), "add a floor called Attic");
+    expect(r2?.kind).toBe("patch");
+    if (r2?.kind !== "patch") return;
+    expect(r2.patch.ops[0]).toMatchObject({ op: "addLevel", name: "Attic" });
+  });
+
+  it("matches switching to a level by ordinal and by name", () => {
+    const base = planWithRooms();
+    const withLevel = applyPatch(base, { ops: [{ op: "addLevel", name: "Second Floor" }], source: "user" });
+    if (!withLevel.ok) throw new Error("setup failed");
+    const groundId = withLevel.doc.levels.find((l) => l.name !== "Second Floor")!.id;
+
+    const r1 = matchDeterministicIntent(withLevel.doc, "switch to the ground floor");
+    expect(r1?.kind).toBe("patch");
+    if (r1?.kind !== "patch") return;
+    expect(r1.patch.ops[0]).toMatchObject({ op: "setActiveLevel", levelId: groundId });
+
+    const r2 = matchDeterministicIntent(withLevel.doc, "go to Second Floor");
+    expect(r2?.kind).toBe("patch");
+    if (r2?.kind !== "patch") return;
+    expect(r2.patch.ops[0]).toMatchObject({ op: "setActiveLevel" });
+  });
+
+  it("matches renaming a level without falling through to room rename", () => {
+    const base = planWithRooms();
+    const withLevel = applyPatch(base, { ops: [{ op: "addLevel", name: "Second Floor" }], source: "user" });
+    if (!withLevel.ok) throw new Error("setup failed");
+
+    const result = matchDeterministicIntent(withLevel.doc, "rename level 2 to Attic");
+    expect(result?.kind).toBe("patch");
+    if (result?.kind !== "patch") return;
+    expect(result.patch.ops[0]).toMatchObject({ op: "renameLevel", name: "Attic" });
+  });
+
+  it("units switch still works and isn't shadowed by the level-switch matcher", () => {
+    const result = matchDeterministicIntent(planWithRooms(), "switch to metric");
+    expect(result?.kind).toBe("patch");
+    if (result?.kind !== "patch") return;
+    expect(result.patch.ops[0]).toMatchObject({ op: "setUnits", units: "metric" });
+  });
 });

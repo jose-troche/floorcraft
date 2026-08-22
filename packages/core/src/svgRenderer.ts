@@ -25,6 +25,7 @@ export const PROGRAM_COLORS: Record<RoomProgram, string> = {
   pantry: "#B4A57A",
   entry: "#A0C4E9",
   mudroom: "#C7B7A3",
+  stair: "#4E4E4E",
   other: "#EEEEEE",
 };
 

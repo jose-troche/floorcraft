@@ -12,7 +12,7 @@ import type {
   RoomSide,
   WallGraph,
 } from "./types.js";
-import { polygonFromBoundary, type Point } from "./wallGraph.js";
+import { polygonContains, polygonFromBoundary, type Point } from "./wallGraph.js";
 
 /** Openings never sit flush against a corner; walls need a bit of structure at the ends. */
 const END_CLEARANCE_MM = 100;
@@ -58,22 +58,33 @@ export function edgeEndpoints(graph: WallGraph, edgeId: EdgeId): { a: Point; b: 
   return { a, b };
 }
 
-/** Which side of `roomId`'s bounding box this edge lies on, if any. */
+/**
+ * Which side of `roomId` this edge lies on, if any. Determined by probing a millimetre to
+ * either side of the edge's midpoint and asking which side is inside the room's polygon —
+ * a bounding-box comparison (the pre-L-shape approach) misclassifies a wall on the far side
+ * of a notch, whose midpoint doesn't sit on the bbox edge it logically belongs to.
+ */
 export function sideOfRoom(graph: WallGraph, roomId: RoomId, edgeId: EdgeId): RoomSide | null {
-  const bounds = roomBounds(graph, roomId);
+  const room = graph.rooms[roomId];
   const ends = edgeEndpoints(graph, edgeId);
-  if (!bounds || !ends) return null;
+  if (!room || !ends) return null;
+  const pts = polygonFromBoundary(graph, room.boundary);
+  if (pts.length < 3) return null;
   const midX = (ends.a.x + ends.b.x) / 2;
   const midY = (ends.a.y + ends.b.y) / 2;
   const vertical = ends.a.x === ends.b.x;
-  const eps = 1;
+  const probe = 1;
   if (vertical) {
-    if (Math.abs(midX - bounds.x0) <= eps) return "left";
-    if (Math.abs(midX - bounds.x1) <= eps) return "right";
+    const interiorRight = polygonContains(pts, { x: midX + probe, y: midY });
+    const interiorLeft = polygonContains(pts, { x: midX - probe, y: midY });
+    if (interiorRight && !interiorLeft) return "left"; // interior is to the right: this is the room's left wall
+    if (interiorLeft && !interiorRight) return "right";
     return null;
   }
-  if (Math.abs(midY - bounds.y0) <= eps) return "top";
-  if (Math.abs(midY - bounds.y1) <= eps) return "bottom";
+  const interiorBelow = polygonContains(pts, { x: midX, y: midY + probe });
+  const interiorAbove = polygonContains(pts, { x: midX, y: midY - probe });
+  if (interiorBelow && !interiorAbove) return "top"; // interior is below: this is the room's top wall
+  if (interiorAbove && !interiorBelow) return "bottom";
   return null;
 }
 

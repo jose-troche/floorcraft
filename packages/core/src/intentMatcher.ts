@@ -11,7 +11,7 @@
 // is left untouched and the user is asked one question (FR-5).
 
 import { toMm, unitFor, CROSS, NUMBER, UNIT_PATTERN } from "./dimensionParser.js";
-import type { Patch, PlanDocument, RoomConstraints, RoomId, RoomProgram, SpatialDirection, Units } from "./types.js";
+import { DEFAULT_AREA_WEIGHT, generatorTree, type LevelId, type Patch, type PlanDocument, type RoomConstraints, type RoomId, type RoomProgram, type SpatialDirection, type Units } from "./types.js";
 import { activeLevel } from "./patch.js";
 
 export type IntentResult =
@@ -54,29 +54,13 @@ const PROGRAM_SYNONYMS: Record<string, RoomProgram> = {
   foyer: "entry",
   mudroom: "mudroom",
   "mud room": "mudroom",
+  stair: "stair",
+  stairs: "stair",
+  staircase: "stair",
+  stairwell: "stair",
   // Generic requests ("add a room 3x4 ft") are legitimate and shouldn't need a program.
   room: "other",
   space: "other",
-};
-
-const DEFAULT_AREA_WEIGHT: Record<RoomProgram, number> = {
-  kitchen: 1.2,
-  living: 1.6,
-  family: 1.4,
-  dining: 1.0,
-  bedroom: 1.2,
-  "primary-bedroom": 1.6,
-  bath: 0.5,
-  "half-bath": 0.25,
-  laundry: 0.4,
-  office: 0.8,
-  garage: 1.8,
-  hallway: 0.4,
-  closet: 0.2,
-  pantry: 0.3,
-  entry: 0.4,
-  mudroom: 0.4,
-  other: 1.0,
 };
 
 function normalize(s: string): string {
@@ -120,6 +104,52 @@ function resolveRoom(doc: PlanDocument, text: string): RoomLookup {
   if (partial.length === 1) return { kind: "one", roomId: partial[0]!.roomId, name: partial[0]!.name };
   if (partial.length > 1) return { kind: "many", candidates: partial };
   return { kind: "none" };
+}
+
+// ---------------------------------------------------------------- level lookup
+
+const LEVEL_ORDINALS: Record<string, number> = {
+  ground: 0,
+  first: 0,
+  "1st": 0,
+  second: 1,
+  "2nd": 1,
+  third: 2,
+  "3rd": 2,
+  fourth: 3,
+  "4th": 3,
+  fifth: 4,
+  "5th": 4,
+};
+
+/**
+ * Resolves "level 2" / "the second floor" / "Attic" against the document's levels,
+ * ordered by elevation. Unlike resolveRoom this has no clarify path: levels are few
+ * (typically 1-3), so a miss just falls through to whatever matcher runs next rather
+ * than spending FR-5's one-question-per-turn budget on a low-stakes reference.
+ */
+function resolveLevelRef(doc: PlanDocument, text: string): { levelId: LevelId; name: string } | null {
+  const needle = normalize(text);
+  if (!needle) return null;
+  const sorted = [...doc.levels].sort((a, b) => a.elevation - b.elevation);
+
+  const ordinalMatch = needle.match(/^(ground|1st|2nd|3rd|4th|5th|first|second|third|fourth|fifth)(?:\s+(?:floor|level|storey|story))?$/);
+  if (ordinalMatch) {
+    const level = sorted[LEVEL_ORDINALS[ordinalMatch[1]!]!];
+    if (level) return { levelId: level.id, name: level.name };
+  }
+  // Accepts a bare number too: callers like the "rename level N to X" matcher already
+  // consume the "level"/"floor" word themselves before resolving what's left.
+  const numMatch = needle.match(/^(?:level|floor|storey|story)\s*(\d+)$|^(\d+)$/);
+  if (numMatch) {
+    const level = sorted[Number(numMatch[1] ?? numMatch[2]) - 1];
+    if (level) return { levelId: level.id, name: level.name };
+  }
+  const exact = sorted.find((l) => normalize(l.name) === needle);
+  if (exact) return { levelId: exact.id, name: exact.name };
+  const partial = sorted.filter((l) => normalize(l.name).includes(needle) || needle.includes(normalize(l.name)));
+  if (partial.length === 1) return { levelId: partial[0]!.id, name: partial[0]!.name };
+  return null;
 }
 
 function listNames(names: string[]): string {
@@ -332,6 +362,14 @@ export function matchDeterministicIntent(doc: PlanDocument, utteranceRaw: string
 
   let m: RegExpMatchArray | null;
 
+  // "rename level 2 to Attic" / "rename the second floor to Attic" — checked ahead of the
+  // generic room rename below, or "level 2" would be looked up as a room name and fail.
+  m = utterance.match(/rename\s+(?:the\s+)?(?:level|floor|storey|story)\s+(.+?)\s+(?:to|as)\s+(.+)/i);
+  if (m) {
+    const level = resolveLevelRef(doc, m[1]!);
+    if (level) return patch([{ op: "renameLevel", levelId: level.levelId, name: m[2]!.trim() }]);
+  }
+
   // "rename X to Y" / "call the X Y" / "rename X as Y"
   m = utterance.match(/rename\s+(?:the\s+)?(.+?)\s+(?:to|as)\s+(.+)/i);
   if (!m) m = utterance.match(/call\s+(?:the\s+)?(.+?)\s+(.+)/i);
@@ -339,6 +377,20 @@ export function matchDeterministicIntent(doc: PlanDocument, utteranceRaw: string
     const room = requireRoom(doc, m[1]!);
     if (!room.ok) return room.clarify;
     return patch([{ op: "renameRoom", roomId: room.roomId, name: m[2]!.trim() }]);
+  }
+
+  // "add a floor" / "add another level" / "add a second floor called Attic"
+  m = utterance.match(
+    /^add\s+(?:a\s+|another\s+)?(?:new\s+|second\s+|third\s+|fourth\s+|\d+\w*\s+)?(?:floor|level|storey|story)(?:\s+(?:called|named)\s+(.+))?$/i,
+  );
+  if (m) return patch([{ op: "addLevel", name: m[1]?.trim() || undefined }]);
+
+  // "go to level 2" / "switch to the ground floor" — resolveLevelRef requires the text to
+  // actually look like a level reference, so this can't shadow "switch to metric" below.
+  m = utterance.match(/^(?:go to|switch to|show)\s+(?:the\s+)?(.+)$/i);
+  if (m) {
+    const level = resolveLevelRef(doc, m[1]!);
+    if (level) return patch([{ op: "setActiveLevel", levelId: level.levelId }]);
   }
 
   // "swap X and Y"
@@ -381,7 +433,7 @@ export function matchDeterministicIntent(doc: PlanDocument, utteranceRaw: string
     }
     const room = requireRoom(doc, roomText);
     if (!room.ok) return room.clarify;
-    const leaf = activeLevel(doc).generator?.tree;
+    const leaf = generatorTree(activeLevel(doc));
     const current = leaf ? findLeafWeight(leaf, room.roomId) : null;
     if (current !== null) {
       const factor = 1 + (growing ? 1 : -1) * (pct / 100);

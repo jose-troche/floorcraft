@@ -105,6 +105,29 @@ test("resizing the outer boundary via its handle changes the footprint (FR-7)", 
   }).toPass({ timeout: 2000 });
 });
 
+test("serves a strict CSP on API responses, that still permits the Blob-download export buttons (SEC-4)", async ({ page }) => {
+  // Static assets (the page itself) bypass the Worker by default and don't currently
+  // carry this header — see the "Known gap" note in worker/security.ts. /api/config
+  // always goes through the Worker, so it's what's actually under test here.
+  const configResponse = await page.request.get("/api/config");
+  const csp = configResponse.headers()["content-security-policy"];
+  expect(csp).toBeTruthy();
+  await page.goto("/");
+  expect(csp).toContain("default-src 'self'");
+  expect(csp).toContain("object-src 'none'");
+  // Tier 2/3 call their providers directly from the browser (T2-1, T3-3) — connect-src
+  // has to name them or the CSP itself would block a connected tier's requests.
+  expect(csp).toContain("https://openrouter.ai");
+  expect(csp).toContain("https://api.anthropic.com");
+
+  await page.getByRole("button", { name: "Manual editor" }).click();
+  const addRoomButton = page.getByRole("button", { name: "Add room", exact: true });
+  await addRoomButton.click();
+
+  const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "JSON" }).click()]);
+  expect(download.suggestedFilename()).toMatch(/\.json$/);
+});
+
 test("with no inference tier reachable, chat is disabled and manual editing still works (RTE-4)", async ({ page }) => {
   await page.goto("/");
   // Tier 0 is Chrome-desktop-only and unavailable in this sandboxed browser profile;

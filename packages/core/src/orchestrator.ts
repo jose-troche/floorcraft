@@ -15,7 +15,7 @@ import { buildPlanSummary } from "./planSummary.js";
 import { checkConstraintsPossible, parseDimensions, type DimensionWarning } from "./dimensionParser.js";
 import type { PlanDocument, Turn } from "./types.js";
 import type { PlanProvider } from "./providers/types.js";
-import { CORE_PATCH_OPS, FULL_PATCH_OPS, validatePatchResponse } from "./providers/schema.js";
+import { CORE_PATCH_OPS, FREEFORM_PATCH_OPS, FULL_PATCH_OPS, validatePatchResponse } from "./providers/schema.js";
 
 export type TurnOutcome =
   | { kind: "deterministic"; doc: PlanDocument; changes: string[]; warnings?: DimensionWarning[] }
@@ -121,7 +121,11 @@ export async function resolveTurn(
       // that was never asked cannot fix it — see the retry policy below.
       return { ok: false as const, failure: "transport" as const, error: (e as Error).message };
     }
-    const allowed = provider.tier === 0 ? CORE_PATCH_OPS : FULL_PATCH_OPS;
+    // A freeform level (DM-2) has no generator tree to restructure, so it gets the same
+    // reduced vocabulary regardless of tier — mirrors whatever set the provider itself
+    // built its prompt from (see tier0.ts/tier1.ts), so a response is never rejected for
+    // using an op its own prompt just told it was available.
+    const allowed = summary.mode === "freeform" ? FREEFORM_PATCH_OPS : provider.tier === 0 ? CORE_PATCH_OPS : FULL_PATCH_OPS;
     const parsed = validatePatchResponse(raw, allowed);
     if (!parsed.ok) return { ok: false as const, failure: "validation" as const, error: parsed.error };
     const applied = applyPatch(doc_, parsed.patch);

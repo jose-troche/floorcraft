@@ -10,6 +10,7 @@ import { isRateLimited, PLAN_WRITE_LIMIT } from "./rateLimiter";
 import { readClientId, setClientIdCookie } from "./cookies";
 import { errorResponse } from "./redact";
 import { handlePlans } from "./plans";
+import { withSecurityHeaders } from "./security";
 
 // Workers AI retires models on a published schedule, and a retired id fails the whole
 // request (the previous default was deprecated out from under this Worker mid-flight).
@@ -125,43 +126,47 @@ async function handleInfer(request: Request, env: Env): Promise<Response> {
   return new Response(aiResult as ReadableStream, { headers: responseHeaders });
 }
 
+async function route(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+
+  if (url.pathname === "/api/config" && request.method === "GET") {
+    return handleConfig(env);
+  }
+  if (url.pathname === "/api/infer" && request.method === "POST") {
+    return handleInfer(request, env);
+  }
+  if (url.pathname.startsWith("/api/plans")) {
+    if (env.CLOUD_SYNC_ENABLED === "false") return errorResponse("Cloud sync is disabled on this deployment", 503);
+    const ip = getIp(request);
+    if (request.method !== "GET" && isRateLimited(`plans:${ip}`, PLAN_WRITE_LIMIT)) {
+      return errorResponse("Too many requests", 429, { reason: "rate_limited" });
+    }
+    // A plan's owner is identified by the same client cookie the quota uses; a first
+    // save mints it, and the response has to carry it back or the next save is a
+    // different owner.
+    let clientId = readClientId(request);
+    let mintedCookie = false;
+    if (!clientId) {
+      clientId = crypto.randomUUID();
+      mintedCookie = true;
+    }
+    const response = await handlePlans(request, env, url, clientId);
+    if (!response) return errorResponse("Not found", 404);
+    if (!mintedCookie) return response;
+    const headers = new Headers(response.headers);
+    setClientIdCookie(headers, clientId);
+    return new Response(response.body, { status: response.status, headers });
+  }
+  if (url.pathname.startsWith("/api/")) {
+    return errorResponse("Not found", 404);
+  }
+
+  return env.ASSETS.fetch(request);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/api/config" && request.method === "GET") {
-      return handleConfig(env);
-    }
-    if (url.pathname === "/api/infer" && request.method === "POST") {
-      return handleInfer(request, env);
-    }
-    if (url.pathname.startsWith("/api/plans")) {
-      if (env.CLOUD_SYNC_ENABLED === "false") return errorResponse("Cloud sync is disabled on this deployment", 503);
-      const ip = getIp(request);
-      if (request.method !== "GET" && isRateLimited(`plans:${ip}`, PLAN_WRITE_LIMIT)) {
-        return errorResponse("Too many requests", 429, { reason: "rate_limited" });
-      }
-      // A plan's owner is identified by the same client cookie the quota uses; a first
-      // save mints it, and the response has to carry it back or the next save is a
-      // different owner.
-      let clientId = readClientId(request);
-      let mintedCookie = false;
-      if (!clientId) {
-        clientId = crypto.randomUUID();
-        mintedCookie = true;
-      }
-      const response = await handlePlans(request, env, url, clientId);
-      if (!response) return errorResponse("Not found", 404);
-      if (!mintedCookie) return response;
-      const headers = new Headers(response.headers);
-      setClientIdCookie(headers, clientId);
-      return new Response(response.body, { status: response.status, headers });
-    }
-    if (url.pathname.startsWith("/api/")) {
-      return errorResponse("Not found", 404);
-    }
-
-    return env.ASSETS.fetch(request);
+    return withSecurityHeaders(await route(request, env));
   },
 
   // CF-5: prune quota rows older than 7 days. Configure a cron trigger in wrangler.toml.

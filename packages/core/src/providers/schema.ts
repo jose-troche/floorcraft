@@ -32,18 +32,53 @@ export const FULL_PATCH_OPS = [
   "setDimension",
   "clearDimension",
   "setDimensionRange",
+  "addLevel",
+  "setActiveLevel",
+  "renameLevel",
 ] as const;
 
 /**
- * Ops a person produces by dragging on the canvas (FR-7), deliberately kept out of
- * FULL_PATCH_OPS. They carry raw coordinates and ratios, and the first design decision
- * of the whole system is that the language model never emits geometry (§1.2) — a model
- * asked for a label position or an opening offset has no way to know what is right.
- * They are listed here so the vocabulary stays enumerable in one place (INF-7).
+ * The vocabulary offered to a provider when the active level is freeform (detached — see
+ * Generator in types.ts). Every tree-shaped op (addRoom, resizeRoom, setSplit, dimension
+ * pins, ...) assumes a generator tree to edit and would just fail against cells, so a
+ * freeform level asks the model for less rather than let it guess at a rejected op.
  */
-export const USER_ONLY_PATCH_OPS = ["moveOpening", "setOpeningSwing", "setLabelAnchor"] as const;
+export const FREEFORM_PATCH_OPS = [
+  "renameRoom",
+  "addOpening",
+  "removeOpening",
+  "setBoundary",
+  "setUnits",
+  "addLevel",
+  "setActiveLevel",
+  "renameLevel",
+] as const;
 
-export type OpName = (typeof FULL_PATCH_OPS)[number];
+/**
+ * Ops a person produces by dragging on the canvas (FR-7) or through level-management UI,
+ * deliberately kept out of FULL_PATCH_OPS. Geometry ops carry raw coordinates and ratios,
+ * and the first design decision of the whole system is that the language model never emits
+ * geometry (§1.2) — a model asked for a label position or an opening offset has no way to
+ * know what is right. removeLevel/setLevelProps are precise/destructive-enough operations
+ * that they stay a manual action too. They are listed here so the vocabulary stays
+ * enumerable in one place (INF-7).
+ */
+export const USER_ONLY_PATCH_OPS = [
+  "moveOpening",
+  "setOpeningSwing",
+  "setLabelAnchor",
+  "detachGenerator",
+  "reattachGenerator",
+  "setRoomRects",
+  "removeLevel",
+  "setLevelProps",
+] as const;
+
+// Every op name that can legally reach validateOp: the `allowed` set passed in is always
+// FULL_PATCH_OPS, FREEFORM_PATCH_OPS, or the CORE_PATCH_OPS subset of FULL. USER_ONLY_PATCH_OPS
+// never appears here — those ops are constructed directly by client code (dragPlan.ts etc.)
+// and applied without going through provider-response validation at all.
+export type OpName = (typeof FULL_PATCH_OPS)[number] | (typeof FREEFORM_PATCH_OPS)[number];
 
 const ROOM_PROGRAMS = Object.keys(ROOM_PROGRAM_MIN_DIMENSIONS) as RoomProgram[];
 
@@ -173,6 +208,26 @@ function validateOp(raw: unknown, allowed: ReadonlySet<string>): PatchOp | strin
         maxMm: o.maxMm as number | undefined,
       };
     }
+    case "addLevel": {
+      if (o.name !== undefined && typeof o.name !== "string") return "addLevel: name must be a string";
+      if (o.levelId !== undefined && typeof o.levelId !== "string") return "addLevel: levelId must be a string";
+      if (o.copyFromLevelId !== undefined && typeof o.copyFromLevelId !== "string") return "addLevel: copyFromLevelId must be a string";
+      return {
+        op: "addLevel",
+        levelId: o.levelId as string | undefined,
+        name: o.name as string | undefined,
+        copyFromLevelId: o.copyFromLevelId as string | undefined,
+      };
+    }
+    case "setActiveLevel": {
+      if (!isNonEmptyString(o.levelId)) return "setActiveLevel: levelId is required";
+      return { op: "setActiveLevel", levelId: o.levelId };
+    }
+    case "renameLevel": {
+      if (!isNonEmptyString(o.levelId)) return "renameLevel: levelId is required";
+      if (!isNonEmptyString(o.name)) return "renameLevel: name is required";
+      return { op: "renameLevel", levelId: o.levelId, name: o.name };
+    }
     default:
       return `unhandled op '${op}'`;
   }
@@ -236,6 +291,21 @@ export function buildPatchJsonSchema(allowedOps: readonly string[]): Record<stri
       type: "object",
       properties: { op: { const: "setUnits" }, units: { type: "string", enum: ["imperial", "metric"] } },
       required: ["op", "units"],
+    },
+    addLevel: {
+      type: "object",
+      properties: { op: { const: "addLevel" }, name: { type: "string" }, copyFromLevelId: { type: "string" } },
+      required: ["op"],
+    },
+    setActiveLevel: {
+      type: "object",
+      properties: { op: { const: "setActiveLevel" }, levelId: { type: "string" } },
+      required: ["op", "levelId"],
+    },
+    renameLevel: {
+      type: "object",
+      properties: { op: { const: "renameLevel" }, levelId: { type: "string" }, name: { type: "string" } },
+      required: ["op", "levelId", "name"],
     },
   };
 

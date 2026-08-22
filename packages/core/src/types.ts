@@ -28,6 +28,7 @@ export type RoomProgram =
   | "pantry"
   | "entry"
   | "mudroom"
+  | "stair"
   | "other";
 
 /** SLV-2 required tier 1: minimum room dimensions per program, in mm. */
@@ -48,6 +49,10 @@ export const ROOM_PROGRAM_MIN_DIMENSIONS: Record<RoomProgram, { minWidth: number
   pantry: { minWidth: 760, minDepth: 760 },
   entry: { minWidth: 1220, minDepth: 1220 },
   mudroom: { minWidth: 1220, minDepth: 1520 },
+  // Standard single-flight run: ~915mm clear width, ~3050mm to clear a 2440 floor-to-floor
+  // rise at a 7"/11" rise/run (stairs.ts's alignment check treats this as the footprint a
+  // stair core needs to line up between levels).
+  stair: { minWidth: 915, minDepth: 3050 },
   other: { minWidth: 910, minDepth: 910 },
 };
 
@@ -73,6 +78,7 @@ export const DEFAULT_AREA_WEIGHT: Record<RoomProgram, number> = {
   pantry: 0.3,
   entry: 0.4,
   mudroom: 0.4,
+  stair: 0.6,
   other: 1.0,
 };
 
@@ -191,13 +197,31 @@ export type SlicingTree = SlicingLeaf | SlicingSplit;
 /** A path of child indices from the tree root, e.g. [0, 1] = root.children[0].children[1]. */
 export type NodePath = number[];
 
-export type Generator = {
-  tree: SlicingTree;
-  detached?: false;
-} | {
-  tree?: SlicingTree;
-  detached: true;
-};
+/** An axis-aligned rectangle in level-local mm. */
+export type Rect = { x: number; y: number; w: number; d: number };
+
+/**
+ * One rectangular piece of a room. A room with a single cell is an ordinary rectangular
+ * room; a room with several is a rectilinear union (FR-11) — an L-shape is two cells that
+ * share a full face.
+ */
+export type RoomCell = Rect & { roomId: RoomId };
+
+/**
+ * A level's layout source (DM-2). `slicing` is generated: the tree is evaluated fresh by
+ * the solver on every patch. `freeform` is the "detached" state DM-2 describes: an edit the
+ * tree can't express (a partial wall drag, an L-shape) freezes the last-solved rectangles
+ * into `cells` and edits apply to those directly from then on. `savedTree` is what makes
+ * "restore generated layout" a single click instead of a redraw from scratch.
+ */
+export type Generator =
+  | { kind: "slicing"; tree: SlicingTree }
+  | { kind: "freeform"; cells: RoomCell[]; savedTree?: SlicingTree };
+
+/** The generator tree driving a level, if it has one — undefined for a freeform level. */
+export function generatorTree(level: Level): SlicingTree | undefined {
+  return level.generator?.kind === "slicing" ? level.generator.tree : undefined;
+}
 
 export type Level = {
   id: LevelId;
@@ -262,11 +286,23 @@ export type PatchOp =
   | { op: "moveOpening"; openingId: OpeningId; offsetRatio: number }
   | { op: "setOpeningSwing"; openingId: OpeningId; swing: DoorSwing }
   | { op: "setLabelAnchor"; roomId: RoomId; x: number; y: number }
+  // Detached/freeform editing (DM-2, FR-11). setRoomRects is the one primitive every
+  // freeform gesture (wall drag, L-shape split) reduces to; see dragPlan.ts.
+  | { op: "detachGenerator" }
+  | { op: "reattachGenerator" }
+  | { op: "setRoomRects"; roomId: RoomId; rects: Rect[] }
   | { op: "setBoundary"; widthMm: number; depthMm: number }
   | { op: "setUnits"; units: Units }
   | { op: "setDimension"; roomId: RoomId; dimensionType: DimensionType; value: number; unit?: "ft" | "m" }
   | { op: "clearDimension"; roomId: RoomId; dimensionType: DimensionType }
-  | { op: "setDimensionRange"; roomId: RoomId; dimensionType: DimensionType; minMm?: number; maxMm?: number };
+  | { op: "setDimensionRange"; roomId: RoomId; dimensionType: DimensionType; minMm?: number; maxMm?: number }
+  // Multi-storey (Phase 3). Document-scoped: applied before the rest of the patch, against
+  // whichever level is active once they've run — see applyPatch in patch.ts.
+  | { op: "addLevel"; levelId?: LevelId; name?: string; copyFromLevelId?: LevelId }
+  | { op: "removeLevel"; levelId: LevelId }
+  | { op: "setActiveLevel"; levelId: LevelId }
+  | { op: "renameLevel"; levelId: LevelId; name: string }
+  | { op: "setLevelProps"; levelId: LevelId; elevation?: number; floorToCeiling?: number };
 
 export type Patch = {
   ops: PatchOp[];
@@ -281,7 +317,14 @@ export type Patch = {
 
 export type SolveViolation = {
   roomIds: RoomId[];
-  reason: "min-dimension" | "unsatisfiable-ratio" | "boundary-too-small" | "conflicting-constraints";
+  reason:
+    | "min-dimension"
+    | "unsatisfiable-ratio"
+    | "boundary-too-small"
+    | "conflicting-constraints"
+    | "overlapping-rooms"
+    | "disconnected-room"
+    | "out-of-bounds";
   message: string;
 };
 
@@ -312,5 +355,7 @@ export type PlanSummary = {
     exterior: boolean;
   }>;
   adjacencies: Array<[RoomId, RoomId]>;
+  /** Freeform levels have no generator tree to restructure — see FREEFORM_PATCH_OPS. */
+  mode: "slicing" | "freeform";
   generatorTree: SlicingTree | null;
 };

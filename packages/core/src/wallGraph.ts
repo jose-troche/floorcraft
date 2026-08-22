@@ -2,7 +2,7 @@
 // planar WallGraph (DM-1, DM-5): shared centerlines with thickness, rooms referencing
 // ordered boundary edge cycles. Face polygons are derived at render time, never stored.
 
-import type { EdgeId, NodeId, Opening, Room, RoomId, WallEdge, WallGraph } from "./types.js";
+import type { EdgeId, NodeId, Opening, Room, RoomCell, RoomId, SolveViolation, WallEdge, WallGraph } from "./types.js";
 export type Point = { x: number; y: number };
 import type { LeafRect } from "./slicingSolver.js";
 
@@ -76,16 +76,104 @@ class NodeAllocator {
 
 export type RoomMeta = Pick<Room, "name" | "program" | "constraints" | "labelAnchor">;
 
+export type BuildWallGraphResult = { ok: true; graph: WallGraph } | { ok: false; violations: SolveViolation[] };
+
 /**
- * Builds the canonical WallGraph from solved leaf rectangles.
+ * Rejects cell configurations the edge-tracing pass below can't be trusted to handle
+ * correctly rather than let it guess. Overlap in particular matters here, not just as a
+ * correctness rule: the interval-covering sampler below picks whichever candidate it finds
+ * first when two intervals overlap at the same point, so an overlap would silently produce
+ * a wrong wall rather than an error.
+ */
+function validateCells(cells: RoomCell[], boundary: { widthMm: number; depthMm: number }): SolveViolation[] {
+  const violations: SolveViolation[] = [];
+  for (const c of cells) {
+    if (c.w <= 0 || c.d <= 0) {
+      violations.push({ roomIds: [c.roomId], reason: "min-dimension", message: `${c.roomId} has a non-positive cell.` });
+    } else if (c.x < 0 || c.y < 0 || c.x + c.w > boundary.widthMm || c.y + c.d > boundary.depthMm) {
+      violations.push({
+        roomIds: [c.roomId],
+        reason: "out-of-bounds",
+        message: `${c.roomId} has a cell outside the ${boundary.widthMm}mm x ${boundary.depthMm}mm boundary.`,
+      });
+    }
+  }
+  for (let i = 0; i < cells.length; i++) {
+    for (let j = i + 1; j < cells.length; j++) {
+      const a = cells[i]!;
+      const b = cells[j]!;
+      const overlapW = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+      const overlapD = Math.min(a.y + a.d, b.y + b.d) - Math.max(a.y, b.y);
+      if (overlapW > 0 && overlapD > 0) {
+        violations.push({
+          roomIds: [...new Set([a.roomId, b.roomId])],
+          reason: "overlapping-rooms",
+          message:
+            a.roomId === b.roomId
+              ? `${a.roomId} has two overlapping cells.`
+              : `${a.roomId} and ${b.roomId} overlap.`,
+        });
+      }
+    }
+  }
+  return violations;
+}
+
+type DirectedEdge = { from: NodeId; to: NodeId; edgeId: EdgeId };
+
+/**
+ * Chains one room's directed boundary edges into a single closed cycle. A simply-connected
+ * rectilinear region has exactly one outgoing edge per boundary node; two edges leaving the
+ * same node means the cells touch at a single pinch point (self-intersecting, not a valid
+ * simple polygon), and a cycle that closes before consuming every edge means the room has a
+ * hole or is split across disconnected cells (SLV-1's "no gaps" extended to unions). Either
+ * way this returns null rather than a partial boundary — SLV-3 never renders broken geometry.
+ */
+function chainBoundaryCycle(directed: DirectedEdge[], nodes: Record<NodeId, Point>): EdgeId[] | null {
+  if (directed.length === 0) return [];
+  const byFrom = new Map<NodeId, DirectedEdge>();
+  for (const e of directed) {
+    if (byFrom.has(e.from)) return null; // pinch point: two boundary edges leave the same node
+    byFrom.set(e.from, e);
+  }
+  // The cycle itself doesn't care where it starts, but a stable, deterministic choice
+  // (topmost, then leftmost node) keeps output reproducible run to run instead of
+  // depending on edge-generation order — same reasoning a rectangular room's boundary
+  // has always started at its top-left corner.
+  let start = directed[0]!.from;
+  for (const e of directed) {
+    const a = nodes[e.from]!;
+    const b = nodes[start]!;
+    if (a.y < b.y || (a.y === b.y && a.x < b.x)) start = e.from;
+  }
+  const boundary: EdgeId[] = [];
+  let current = start;
+  for (let i = 0; i < directed.length; i++) {
+    const edge = byFrom.get(current);
+    if (!edge) return null;
+    boundary.push(edge.edgeId);
+    current = edge.to;
+    if (current === start) return boundary.length === directed.length ? boundary : null;
+  }
+  return null;
+}
+
+/**
+ * Builds the canonical WallGraph from a room's solved rectangles (DM-1, DM-5, FR-11).
  * `roomMeta` supplies the non-geometric fields (name/program/constraints) that persist
- * across regenerations; boundary edge cycles are always recomputed here.
+ * across regenerations; boundary edge cycles are always recomputed here. A room may own
+ * more than one cell — an L-shape is two cells sharing a full face — so wall edges where
+ * both sides resolve to the same room are internal seams and are dissolved rather than
+ * drawn.
  */
 export function buildWallGraph(
-  leaves: LeafRect[],
+  cells: RoomCell[],
   boundary: { widthMm: number; depthMm: number },
   roomMeta: Record<RoomId, RoomMeta>,
-): WallGraph {
+): BuildWallGraphResult {
+  const cellViolations = validateCells(cells, boundary);
+  if (cellViolations.length > 0) return { ok: false, violations: cellViolations };
+
   const verticalByX = new Map<number, VInterval[]>();
   const horizontalByY = new Map<number, HInterval[]>();
 
@@ -100,7 +188,7 @@ export function buildWallGraph(
     horizontalByY.set(y, arr);
   };
 
-  for (const r of leaves) {
+  for (const r of cells) {
     pushV(r.x, { y0: r.y, y1: r.y + r.d, rightRoomId: r.roomId });
     pushV(r.x + r.w, { y0: r.y, y1: r.y + r.d, leftRoomId: r.roomId });
     pushH(r.y, { x0: r.x, x1: r.x + r.w, belowRoomId: r.roomId });
@@ -109,11 +197,12 @@ export function buildWallGraph(
 
   const nodes = new NodeAllocator();
   const edges: Record<EdgeId, WallEdge> = {};
-  // Per room, per side, collect the ordered list of {pos, edgeId} to assemble a CCW boundary cycle.
-  const topEdgesByRoom = new Map<RoomId, Array<{ x0: number; edgeId: EdgeId }>>();
-  const rightEdgesByRoom = new Map<RoomId, Array<{ y0: number; edgeId: EdgeId }>>();
-  const bottomEdgesByRoom = new Map<RoomId, Array<{ x0: number; edgeId: EdgeId }>>();
-  const leftEdgesByRoom = new Map<RoomId, Array<{ y0: number; edgeId: EdgeId }>>();
+  const directedByRoom = new Map<RoomId, DirectedEdge[]>();
+  const pushDirected = (roomId: RoomId, edge: DirectedEdge) => {
+    const arr = directedByRoom.get(roomId) ?? [];
+    arr.push(edge);
+    directedByRoom.set(roomId, arr);
+  };
 
   let edgeSeq = 0;
 
@@ -127,6 +216,7 @@ export function buildWallGraph(
       const leftRoomId = coveringLeft(intervals, p0, p1);
       const rightRoomId = coveringRight(intervals, p0, p1);
       if (!leftRoomId && !rightRoomId) continue; // shouldn't happen
+      if (leftRoomId && rightRoomId && leftRoomId === rightRoomId) continue; // same-room seam: dissolve
       const isExterior = x === 0 || x === boundary.widthMm;
       const a = nodes.get(x, p0);
       const b = nodes.get(x, p1);
@@ -138,16 +228,10 @@ export function buildWallGraph(
         type: isExterior ? "exterior" : "interior",
         openings: [],
       };
-      if (leftRoomId) {
-        const arr = rightEdgesByRoom.get(leftRoomId) ?? [];
-        arr.push({ y0: p0, edgeId });
-        rightEdgesByRoom.set(leftRoomId, arr);
-      }
-      if (rightRoomId) {
-        const arr = leftEdgesByRoom.get(rightRoomId) ?? [];
-        arr.push({ y0: p0, edgeId });
-        leftEdgesByRoom.set(rightRoomId, arr);
-      }
+      // Room's right wall (room is to the left of this line): low-y -> high-y.
+      if (leftRoomId) pushDirected(leftRoomId, { from: a, to: b, edgeId });
+      // Room's left wall (room is to the right of this line): high-y -> low-y.
+      if (rightRoomId) pushDirected(rightRoomId, { from: b, to: a, edgeId });
     }
   }
 
@@ -161,6 +245,7 @@ export function buildWallGraph(
       const aboveRoomId = coveringAbove(intervals, p0, p1);
       const belowRoomId = coveringBelow(intervals, p0, p1);
       if (!aboveRoomId && !belowRoomId) continue;
+      if (aboveRoomId && belowRoomId && aboveRoomId === belowRoomId) continue; // same-room seam: dissolve
       const isExterior = y === 0 || y === boundary.depthMm;
       const a = nodes.get(p0, y);
       const b = nodes.get(p1, y);
@@ -172,57 +257,79 @@ export function buildWallGraph(
         type: isExterior ? "exterior" : "interior",
         openings: [],
       };
-      if (belowRoomId) {
-        const arr = topEdgesByRoom.get(belowRoomId) ?? [];
-        arr.push({ x0: p0, edgeId });
-        topEdgesByRoom.set(belowRoomId, arr);
-      }
-      if (aboveRoomId) {
-        const arr = bottomEdgesByRoom.get(aboveRoomId) ?? [];
-        arr.push({ x0: p0, edgeId });
-        bottomEdgesByRoom.set(aboveRoomId, arr);
-      }
+      // Room's top wall (room is below this line): low-x -> high-x.
+      if (belowRoomId) pushDirected(belowRoomId, { from: a, to: b, edgeId });
+      // Room's bottom wall (room is above this line): high-x -> low-x.
+      if (aboveRoomId) pushDirected(aboveRoomId, { from: b, to: a, edgeId });
     }
   }
 
   const rooms: Record<RoomId, Room> = {};
-  for (const r of leaves) {
-    const top = (topEdgesByRoom.get(r.roomId) ?? []).sort((a, b) => a.x0 - b.x0).map((e) => e.edgeId);
-    const right = (rightEdgesByRoom.get(r.roomId) ?? []).sort((a, b) => a.y0 - b.y0).map((e) => e.edgeId);
-    const bottom = (bottomEdgesByRoom.get(r.roomId) ?? [])
-      .sort((a, b) => b.x0 - a.x0)
-      .map((e) => e.edgeId);
-    const left = (leftEdgesByRoom.get(r.roomId) ?? []).sort((a, b) => b.y0 - a.y0).map((e) => e.edgeId);
-    const meta = roomMeta[r.roomId];
-    rooms[r.roomId] = {
-      name: meta?.name ?? r.roomId,
+  const violations: SolveViolation[] = [];
+  const roomIds = new Set(cells.map((c) => c.roomId));
+  for (const roomId of roomIds) {
+    const boundaryCycle = chainBoundaryCycle(directedByRoom.get(roomId) ?? [], nodes.all);
+    if (!boundaryCycle) {
+      violations.push({
+        roomIds: [roomId],
+        reason: "disconnected-room",
+        message: `${roomId} isn't a single connected shape — its cells touch at only a point, enclose a hole, or don't connect.`,
+      });
+      continue;
+    }
+    const meta = roomMeta[roomId];
+    const roomCellList = cells.filter((c) => c.roomId === roomId);
+    rooms[roomId] = {
+      name: meta?.name ?? roomId,
       program: meta?.program ?? "other",
-      boundary: [...top, ...right, ...bottom, ...left],
-      labelAnchor: labelAnchorWithin(r, meta?.labelAnchor),
+      boundary: boundaryCycle,
+      labelAnchor: labelAnchorWithin(roomCellList, meta?.labelAnchor),
       constraints: meta?.constraints,
     };
   }
+  if (violations.length > 0) return { ok: false, violations };
 
-  return { nodes: nodes.all, edges, rooms };
+  return { ok: true, graph: { nodes: nodes.all, edges, rooms } };
 }
 
 /**
  * A dragged label (FR-7) is stored in absolute mm, so a later layout change can leave it
  * outside its own room. Rather than persist a position that renders somewhere confusing,
- * an out-of-room anchor falls back to the room's centre.
+ * an out-of-room anchor falls back to the centre of the room's largest cell — for an
+ * L-shape, the bounding-box centre of the whole union can land outside the room entirely.
  */
 const LABEL_INSET_MM = 150;
 
-function labelAnchorWithin(rect: LeafRect, anchor: Point | undefined): Point {
-  const centre = { x: rect.x + rect.w / 2, y: rect.y + rect.d / 2 };
+function labelAnchorWithin(roomCellList: RoomCell[], anchor: Point | undefined): Point {
+  const largest = roomCellList.reduce((best, c) => (c.w * c.d > best.w * best.d ? c : best));
+  const centre = { x: largest.x + largest.w / 2, y: largest.y + largest.d / 2 };
   if (!anchor) return centre;
-  const inset = Math.min(LABEL_INSET_MM, rect.w / 2, rect.d / 2);
-  const inside =
-    anchor.x >= rect.x + inset &&
-    anchor.x <= rect.x + rect.w - inset &&
-    anchor.y >= rect.y + inset &&
-    anchor.y <= rect.y + rect.d - inset;
+  // Any cell the point falls inside (with a small inset from its edges) keeps the anchor;
+  // only a stale position that no longer lands in the room at all falls back to centre.
+  const inside = roomCellList.some((c) => {
+    const inset = Math.min(LABEL_INSET_MM, c.w / 2, c.d / 2);
+    return (
+      anchor.x >= c.x + inset && anchor.x <= c.x + c.w - inset && anchor.y >= c.y + inset && anchor.y <= c.y + c.d - inset
+    );
+  });
   return inside ? anchor : centre;
+}
+
+/** Ray-casting point-in-polygon test, even-odd rule. Used for L-shape-aware side/label tests. */
+export function polygonContains(pts: Point[], p: Point): boolean {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const pi = pts[i]!;
+    const pj = pts[j]!;
+    const intersects = pi.y > p.y !== pj.y > p.y && p.x < ((pj.x - pi.x) * (p.y - pi.y)) / (pj.y - pi.y) + pi.x;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+/** All cells belonging to one room, in no particular order. */
+export function roomCells(cells: RoomCell[], roomId: RoomId): RoomCell[] {
+  return cells.filter((c) => c.roomId === roomId);
 }
 
 export function roomRect(leaves: LeafRect[], roomId: RoomId): LeafRect | undefined {

@@ -3,6 +3,7 @@ import { PlanStore } from "./store";
 import { ProviderManager } from "./providers";
 import { AppUI } from "./ui";
 import { PlanSync, fetchSharedPlan, readShareParams } from "./sync";
+import { completeConnectIfPending } from "./openrouterAuth";
 
 async function main(): Promise<void> {
   const root = document.getElementById("app");
@@ -23,6 +24,16 @@ async function main(): Promise<void> {
   // the plan, and nothing about viewing it needs an inference tier (FR-14, RTE-4).
   const share = readShareParams();
   const opened = share ? await openShared(store, share) : false;
+
+  // Completes the OpenRouter PKCE flow (T2-1) if this load is the redirect back from
+  // /auth. Runs before providers.init() so a freshly-connected Tier 2 is reflected in
+  // the very first availability check rather than needing a manual refresh.
+  try {
+    if (await completeConnectIfPending()) providers.setActive("tier2-openrouter");
+  } catch (e) {
+    console.warn("Could not complete the OpenRouter connection:", (e as Error).message);
+    window.alert(`Could not connect OpenRouter: ${(e as Error).message}`);
+  }
 
   await providers.init();
   store.setProvider(providers.getActiveProvider());

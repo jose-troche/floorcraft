@@ -3,7 +3,7 @@
 
 import type { Patch, PlanSummary, Turn } from "../types.js";
 import type { Availability, PlanProvider } from "./types.js";
-import { CORE_PATCH_OPS, buildPatchJsonSchema } from "./schema.js";
+import { CORE_PATCH_OPS, FREEFORM_PATCH_OPS, buildPatchJsonSchema } from "./schema.js";
 import { buildSystemPrompt, buildUserPrompt } from "./promptBuilder.js";
 import { safeJsonParse } from "./safeJsonParse.js";
 
@@ -83,9 +83,11 @@ export class Tier0Provider implements PlanProvider {
     const lm = getLanguageModel();
     if (!lm) throw new Error("Tier 0 model unavailable");
 
-    const system = buildSystemPrompt(CORE_PATCH_OPS);
+    // A freeform level has no generator tree to restructure — see FREEFORM_PATCH_OPS.
+    const ops = input.summary.mode === "freeform" ? FREEFORM_PATCH_OPS : CORE_PATCH_OPS;
+    const system = buildSystemPrompt(ops);
     const user = buildUserPrompt({ ...input, tokenBudget: TOKEN_BUDGET });
-    const schema = buildPatchJsonSchema(CORE_PATCH_OPS);
+    const schema = buildPatchJsonSchema(ops);
 
     const base = await this.getBaseSession(lm, system);
     // Clone per turn (cheap — no model reinit) so each call is stateless: our own prompt

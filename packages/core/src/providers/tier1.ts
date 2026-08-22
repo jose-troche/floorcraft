@@ -4,7 +4,7 @@
 
 import type { Patch, PlanSummary, Turn } from "../types.js";
 import type { Availability, PlanProvider } from "./types.js";
-import { FULL_PATCH_OPS, buildPatchJsonSchema } from "./schema.js";
+import { FREEFORM_PATCH_OPS, FULL_PATCH_OPS, buildPatchJsonSchema } from "./schema.js";
 import { buildSystemPrompt, buildUserPrompt } from "./promptBuilder.js";
 import { safeJsonParse } from "./safeJsonParse.js";
 
@@ -30,9 +30,11 @@ export class Tier1Provider implements PlanProvider {
 
   async propose(input: { summary: PlanSummary; utterance: string; history: Turn[] }): Promise<Patch> {
     const fetchFn = this.opts.fetchImpl ?? fetch;
-    const system = buildSystemPrompt(FULL_PATCH_OPS);
+    // A freeform level has no generator tree to restructure — see FREEFORM_PATCH_OPS.
+    const ops = input.summary.mode === "freeform" ? FREEFORM_PATCH_OPS : FULL_PATCH_OPS;
+    const system = buildSystemPrompt(ops);
     const user = buildUserPrompt({ ...input, tokenBudget: TOKEN_BUDGET });
-    const schema = buildPatchJsonSchema(FULL_PATCH_OPS);
+    const schema = buildPatchJsonSchema(ops);
 
     const send = async () => {
       const turnstileToken = await this.opts.getTurnstileToken();

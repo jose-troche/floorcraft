@@ -7,13 +7,17 @@ import {
   ROOM_PROGRAM_MIN_DIMENSIONS,
   emptyWallGraph,
   type DoorSwing,
+  type Generator,
   type Level,
+  type LevelId,
   type OpeningKind,
   type Patch,
   type PatchOp,
   type PersistedOpening,
   type PlanDocument,
+  type Rect,
   type Room,
+  type RoomCell,
   type RoomConstraints,
   type RoomId,
   type RoomProgram,
@@ -30,6 +34,12 @@ import { findLeafPath, getNodeAt, insertLeaf, removeLeaf, setSplitAt, swapLeaves
 export type ApplyPatchResult =
   | { ok: true; doc: PlanDocument; changes: string[] }
   | { ok: false; errors: string[]; violations?: SolveViolation[] };
+
+/** Shown whenever a tree-shaped op (addRoom, resizeRoom, setSplit, dimension pins, ...) is
+ * attempted against a freeform level (DM-2): there is no generator tree for it to edit. */
+const FREEFORM_BLOCKED_MSG =
+  "This level has freeform geometry and can't be restructured this way. Edit it on the canvas, " +
+  "or use \"Restore generated layout\" to go back to the generated one.";
 
 const DEFAULT_OPENING_WIDTH: Record<OpeningKind, number> = {
   door: 810,
@@ -83,11 +93,18 @@ function syncLeafConstraints(leaf: SlicingLeaf, program: RoomProgram, constraint
 }
 
 type LevelState = {
+  /** "slicing" while a generator tree drives this level; "freeform" once detached (DM-2). */
+  mode: "slicing" | "freeform";
   tree: SlicingTree | undefined;
+  /** Freeform mode only — the room-cell union edited directly by setRoomRects. */
+  cells: RoomCell[];
+  /** Freeform mode only — the tree "Restore generated layout" switches back to. */
+  savedTree: SlicingTree | undefined;
   roomMeta: Record<RoomId, RoomMeta>;
   openings: PersistedOpening[];
   boundary: { widthMm: number; depthMm: number };
   units: PlanDocument["units"];
+  gridModule: number;
   roomSeq: number;
   openingSeq: number;
   /**
@@ -140,12 +157,17 @@ function levelStateFromDoc(doc: PlanDocument, level: Level): LevelState {
     roomMeta[roomId] = { name: room.name, program: room.program, constraints: room.constraints, labelAnchor: room.labelAnchor };
   }
   const openings = (level.openings ?? []).map((o) => ({ ...o }));
+  const generator = level.generator;
   return {
-    tree: level.generator?.tree,
+    mode: generator?.kind === "freeform" ? "freeform" : "slicing",
+    tree: generator?.kind === "slicing" ? generator.tree : undefined,
+    cells: generator?.kind === "freeform" ? generator.cells.map((c) => ({ ...c })) : [],
+    savedTree: generator?.kind === "freeform" ? generator.savedTree : undefined,
     roomMeta,
     openings,
     boundary: level.boundary,
     units: doc.units,
+    gridModule: doc.gridModule,
     roomSeq: nextRoomSeq(Object.keys(level.graph.rooms)),
     openingSeq: nextOpeningSeq(openings),
     graphBefore: level.graph,
@@ -157,6 +179,7 @@ function applyDimensionOp(
   roomId: RoomId,
   mutate: (leaf: SlicingLeaf, meta: RoomMeta) => { leaf: SlicingLeaf; meta: RoomMeta },
 ): string | null {
+  if (state.mode === "freeform") return FREEFORM_BLOCKED_MSG;
   if (!state.tree) return `Room ${roomId} not found`;
   const path = findLeafPath(state.tree, roomId);
   if (!path) return `Room ${roomId} not found`;
@@ -183,6 +206,10 @@ function applyTreeOps(
   for (const op of ops) {
     switch (op.op) {
       case "addRoom": {
+        if (state.mode === "freeform") {
+          errors.push(FREEFORM_BLOCKED_MSG);
+          break;
+        }
         const roomId = allocateRoomId(state, op.roomId);
         addedRoomIds.push(roomId);
         const leaf = syncLeafConstraints(
@@ -199,11 +226,18 @@ function applyTreeOps(
         break;
       }
       case "removeRoom": {
-        if (!state.tree || !state.roomMeta[op.roomId]) {
+        if (!state.roomMeta[op.roomId]) {
           errors.push(`removeRoom: room ${op.roomId} not found`);
           break;
         }
-        state.tree = removeLeaf(state.tree, op.roomId) ?? undefined;
+        // Freeform removal leaves a void where the room's cells were — a legitimate
+        // freeform shape (a courtyard), unlike the tree case which has no way to express
+        // "nothing here" and must close the gap structurally.
+        if (state.mode === "freeform") {
+          state.cells = state.cells.filter((c) => c.roomId !== op.roomId);
+        } else {
+          state.tree = state.tree ? (removeLeaf(state.tree, op.roomId) ?? undefined) : undefined;
+        }
         delete state.roomMeta[op.roomId];
         // An opening anchored to a room that no longer exists can never resolve again.
         // Undo restores the whole document, so dropping them here loses nothing.
@@ -222,6 +256,10 @@ function applyTreeOps(
         break;
       }
       case "resizeRoom": {
+        if (state.mode === "freeform") {
+          errors.push(FREEFORM_BLOCKED_MSG);
+          break;
+        }
         if (!state.tree) {
           errors.push(`resizeRoom: room ${op.roomId} not found`);
           break;
@@ -264,6 +302,10 @@ function applyTreeOps(
         break;
       }
       case "swapRooms": {
+        if (state.mode === "freeform") {
+          errors.push(FREEFORM_BLOCKED_MSG);
+          break;
+        }
         if (!state.tree || !state.roomMeta[op.roomIdA] || !state.roomMeta[op.roomIdB]) {
           errors.push(`swapRooms: room not found`);
           break;
@@ -272,6 +314,10 @@ function applyTreeOps(
         break;
       }
       case "moveRoom": {
+        if (state.mode === "freeform") {
+          errors.push(FREEFORM_BLOCKED_MSG);
+          break;
+        }
         if (!state.tree || !state.roomMeta[op.roomId] || !state.roomMeta[op.relativeTo]) {
           errors.push(`moveRoom: room not found`);
           break;
@@ -282,6 +328,10 @@ function applyTreeOps(
         break;
       }
       case "setSplit": {
+        if (state.mode === "freeform") {
+          errors.push(FREEFORM_BLOCKED_MSG);
+          break;
+        }
         if (!state.tree) {
           errors.push(`setSplit: no tree`);
           break;
@@ -294,11 +344,77 @@ function applyTreeOps(
         break;
       }
       case "setBoundary": {
+        // A tree re-solves against any boundary that fits its minimums (SLV-1), but a
+        // freeform union has no such re-flow: a shrink can only be honoured if no cell
+        // actually falls outside the new footprint (SLV-8's "reject, don't silently
+        // correct" applied to the boundary itself).
+        if (state.mode === "freeform") {
+          const cutRoomIds = new Set<RoomId>();
+          for (const c of state.cells) {
+            if (c.x + c.w > op.widthMm || c.y + c.d > op.depthMm) cutRoomIds.add(c.roomId);
+          }
+          if (cutRoomIds.size > 0) {
+            errors.push(
+              `setBoundary: shrinking to ${op.widthMm}mm x ${op.depthMm}mm would cut ${[...cutRoomIds].join(", ")}. Move or resize those rooms first.`,
+            );
+            break;
+          }
+        }
         state.boundary = { widthMm: op.widthMm, depthMm: op.depthMm };
         break;
       }
       case "setUnits": {
         state.units = op.units;
+        break;
+      }
+      case "detachGenerator": {
+        if (state.mode === "freeform") {
+          errors.push("detachGenerator: level is already freeform.");
+          break;
+        }
+        if (!state.tree) {
+          errors.push("detachGenerator: no generated layout to detach.");
+          break;
+        }
+        const solved = solveSlicingTree(state.tree, state.boundary, state.gridModule);
+        if (!solved.ok) {
+          errors.push(`detachGenerator: ${solved.violations.map((v) => v.message).join(" ")}`);
+          break;
+        }
+        state.cells = solved.leaves.map((l): RoomCell => ({ x: l.x, y: l.y, w: l.w, d: l.d, roomId: l.roomId }));
+        state.savedTree = state.tree;
+        state.tree = undefined;
+        state.mode = "freeform";
+        break;
+      }
+      case "reattachGenerator": {
+        if (state.mode === "slicing") {
+          errors.push("reattachGenerator: level already has a generated layout.");
+          break;
+        }
+        if (!state.savedTree) {
+          errors.push("reattachGenerator: no generated layout to restore.");
+          break;
+        }
+        state.tree = state.savedTree;
+        state.savedTree = undefined;
+        state.cells = [];
+        state.mode = "slicing";
+        break;
+      }
+      case "setRoomRects": {
+        if (state.mode !== "freeform") {
+          errors.push("setRoomRects: level must be freeform first — see detachGenerator.");
+          break;
+        }
+        if (!state.roomMeta[op.roomId]) {
+          errors.push(`setRoomRects: room ${op.roomId} not found`);
+          break;
+        }
+        state.cells = [
+          ...state.cells.filter((c) => c.roomId !== op.roomId),
+          ...op.rects.map((r: Rect): RoomCell => ({ ...r, roomId: op.roomId })),
+        ];
         break;
       }
       case "setDimension": {
@@ -497,7 +613,14 @@ function summarizeChanges(
         changes.push(`Door swing set to ${op.swing}`);
         break;
       case "setSplit":
+      case "setRoomRects":
         changes.push("Moved a wall");
+        break;
+      case "detachGenerator":
+        changes.push("Switched to freeform editing");
+        break;
+      case "reattachGenerator":
+        changes.push("Restored generated layout");
         break;
       case "setLabelAnchor":
         // A label position is a rendering nicety; announcing it would only add noise
@@ -518,46 +641,198 @@ function summarizeChanges(
   return changes;
 }
 
-export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
-  const levelIndex = doc.levels.findIndex((l) => l.id === doc.activeLevelId);
-  if (levelIndex < 0) return { ok: false, errors: [`active level ${doc.activeLevelId} not found`] };
-  const level = doc.levels[levelIndex]!;
+const LEVEL_MANAGEMENT_OPS = new Set<PatchOp["op"]>([
+  "addLevel",
+  "removeLevel",
+  "setActiveLevel",
+  "renameLevel",
+  "setLevelProps",
+]);
 
-  const beforeLeaves = level.generator?.tree ? solveSlicingTree(level.generator.tree, level.boundary, doc.gridModule) : null;
+/** Same reasoning as nextRoomSeq/nextOpeningSeq: ids must clear every id in use. */
+function nextLevelSeq(existingIds: Iterable<LevelId>): number {
+  let max = -1;
+  for (const id of existingIds) {
+    const match = /^level-(\d+)$/.exec(id);
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return max + 1;
+}
+
+type LevelManagementResult =
+  | { ok: true; doc: PlanDocument; changes: string[]; remainingOps: PatchOp[] }
+  | { ok: false; errors: string[] };
+
+/**
+ * Multi-storey ops (Phase 3) are document-scoped, not level-scoped, so they run in their
+ * own pass before the rest of the patch: `activeLevelId` may change mid-patch (addLevel
+ * switches to the level it just created), and everything after this pass — the tree/cell
+ * ops, the solve, the graph rebuild — operates on whichever level is active once these
+ * have run. This is what makes "add a second floor with two bedrooms" one patch instead
+ * of two turns.
+ */
+function applyLevelManagementOps(doc: PlanDocument, ops: PatchOp[]): LevelManagementResult {
+  let levels = doc.levels;
+  let activeLevelId = doc.activeLevelId;
+  const errors: string[] = [];
+  const changes: string[] = [];
+  const remainingOps: PatchOp[] = [];
+  let levelSeq = nextLevelSeq(levels.map((l) => l.id));
+
+  for (const op of ops) {
+    if (!LEVEL_MANAGEMENT_OPS.has(op.op)) {
+      remainingOps.push(op);
+      continue;
+    }
+    switch (op.op) {
+      case "addLevel": {
+        const levelId = op.levelId && !levels.some((l) => l.id === op.levelId) ? op.levelId : `level-${levelSeq++}`;
+        const copyFrom = op.copyFromLevelId ? levels.find((l) => l.id === op.copyFromLevelId) : undefined;
+        const reference = levels.find((l) => l.id === activeLevelId) ?? levels[0];
+        // Carries the source level's room metadata (name/program/constraints) into a
+        // placeholder graph with no geometry yet — levelStateFromDoc reads roomMeta off
+        // graph.rooms, so without this the copied tree/cells would reference rooms with
+        // no name or program the moment this level is solved below.
+        const copiedRooms: Record<RoomId, Room> = {};
+        if (copyFrom) {
+          for (const [roomId, room] of Object.entries(copyFrom.graph.rooms)) {
+            copiedRooms[roomId] = { name: room.name, program: room.program, constraints: room.constraints, boundary: [] };
+          }
+        }
+        const highestTop = levels.length > 0 ? Math.max(...levels.map((l) => l.elevation + l.floorToCeiling)) : 0;
+        const newLevel: Level = {
+          id: levelId,
+          name: op.name ?? `Level ${levels.length + 1}`,
+          elevation: highestTop,
+          floorToCeiling: copyFrom?.floorToCeiling ?? reference?.floorToCeiling ?? 2440,
+          boundary: copyFrom?.boundary ?? reference?.boundary ?? { widthMm: 9000, depthMm: 9000 },
+          generator: copyFrom?.generator
+            ? copyFrom.generator.kind === "slicing"
+              ? { kind: "slicing", tree: copyFrom.generator.tree }
+              : { kind: "freeform", cells: copyFrom.generator.cells.map((c) => ({ ...c })), savedTree: copyFrom.generator.savedTree }
+            : undefined,
+          graph: { nodes: {}, edges: {}, rooms: copiedRooms },
+        };
+        levels = [...levels, newLevel];
+        activeLevelId = levelId;
+        changes.push(`Added ${newLevel.name}`);
+        break;
+      }
+      case "removeLevel": {
+        if (levels.length <= 1) {
+          errors.push("removeLevel: cannot remove the only level.");
+          break;
+        }
+        const removed = levels.find((l) => l.id === op.levelId);
+        if (!removed) {
+          errors.push(`removeLevel: level ${op.levelId} not found`);
+          break;
+        }
+        levels = levels.filter((l) => l.id !== op.levelId);
+        if (activeLevelId === op.levelId) {
+          activeLevelId = levels.reduce((nearest, l) =>
+            Math.abs(l.elevation - removed.elevation) < Math.abs(nearest.elevation - removed.elevation) ? l : nearest,
+          ).id;
+        }
+        changes.push(`Removed ${removed.name}`);
+        break;
+      }
+      case "setActiveLevel": {
+        const target = levels.find((l) => l.id === op.levelId);
+        if (!target) {
+          errors.push(`setActiveLevel: level ${op.levelId} not found`);
+          break;
+        }
+        activeLevelId = target.id;
+        changes.push(`Switched to ${target.name}`);
+        break;
+      }
+      case "renameLevel": {
+        if (!levels.some((l) => l.id === op.levelId)) {
+          errors.push(`renameLevel: level ${op.levelId} not found`);
+          break;
+        }
+        levels = levels.map((l) => (l.id === op.levelId ? { ...l, name: op.name } : l));
+        changes.push(`Renamed level to ${op.name}`);
+        break;
+      }
+      case "setLevelProps": {
+        if (!levels.some((l) => l.id === op.levelId)) {
+          errors.push(`setLevelProps: level ${op.levelId} not found`);
+          break;
+        }
+        levels = levels.map((l) =>
+          l.id === op.levelId
+            ? { ...l, elevation: op.elevation ?? l.elevation, floorToCeiling: op.floorToCeiling ?? l.floorToCeiling }
+            : l,
+        );
+        break;
+      }
+    }
+  }
+
+  if (errors.length > 0) return { ok: false, errors };
+  return { ok: true, doc: { ...doc, levels, activeLevelId }, changes, remainingOps };
+}
+
+export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
+  const levelOpsResult = applyLevelManagementOps(doc, patch.ops);
+  if (!levelOpsResult.ok) return { ok: false, errors: levelOpsResult.errors };
+  const { doc: docAfterLevelOps, changes: levelChanges, remainingOps } = levelOpsResult;
+
+  const levelIndex = docAfterLevelOps.levels.findIndex((l) => l.id === docAfterLevelOps.activeLevelId);
+  if (levelIndex < 0) return { ok: false, errors: [`active level ${docAfterLevelOps.activeLevelId} not found`] };
+  const level = docAfterLevelOps.levels[levelIndex]!;
+
+  const beforeLeaves =
+    level.generator?.kind === "slicing" ? solveSlicingTree(level.generator.tree, level.boundary, docAfterLevelOps.gridModule) : null;
   const beforeAreas = beforeLeaves && beforeLeaves.ok ? leafAreas(beforeLeaves.leaves) : {};
   const namesBefore: Record<RoomId, string> = {};
   for (const [id, r] of Object.entries(level.graph.rooms)) namesBefore[id] = r.name;
 
-  const state = levelStateFromDoc(doc, level);
-  const { errors, addedRoomIds, addedOpeningIds } = applyTreeOps(state, patch.ops, beforeAreas);
+  const state = levelStateFromDoc(docAfterLevelOps, level);
+  const { errors, addedRoomIds, addedOpeningIds } = applyTreeOps(state, remainingOps, beforeAreas);
   if (errors.length > 0) return { ok: false, errors };
 
   let graph: WallGraph;
   let afterLeaves: LeafRect[] = [];
 
-  if (!state.tree) {
-    graph = emptyWallGraph();
+  if (state.mode === "slicing") {
+    if (!state.tree) {
+      graph = emptyWallGraph();
+    } else {
+      const solved = solveSlicingTree(state.tree, state.boundary, docAfterLevelOps.gridModule);
+      if (!solved.ok) return { ok: false, errors: [], violations: solved.violations };
+      afterLeaves = solved.leaves;
+      const built = buildWallGraph(solved.leaves, state.boundary, state.roomMeta);
+      if (!built.ok) return { ok: false, errors: [], violations: built.violations };
+      graph = built.graph;
+      applyOpeningsToGraph(graph, state.openings);
+    }
   } else {
-    const solved = solveSlicingTree(state.tree, state.boundary, doc.gridModule);
-    if (!solved.ok) return { ok: false, errors: [], violations: solved.violations };
-    afterLeaves = solved.leaves;
-    graph = buildWallGraph(solved.leaves, state.boundary, state.roomMeta);
-    applyOpeningsToGraph(graph, state.openings);
+    if (state.cells.length === 0) {
+      graph = emptyWallGraph();
+    } else {
+      const built = buildWallGraph(state.cells, state.boundary, state.roomMeta);
+      if (!built.ok) return { ok: false, errors: [], violations: built.violations };
+      graph = built.graph;
+      applyOpeningsToGraph(graph, state.openings);
+    }
   }
 
   const newLevel: Level = {
     ...level,
     boundary: state.boundary,
-    generator: state.tree ? { tree: state.tree } : undefined,
+    generator: buildGenerator(state),
     openings: state.openings,
     graph,
   };
 
-  const newLevels = [...doc.levels];
+  const newLevels = [...docAfterLevelOps.levels];
   newLevels[levelIndex] = newLevel;
 
   const newDoc: PlanDocument = {
-    ...doc,
+    ...docAfterLevelOps,
     units: state.units,
     levels: newLevels,
     updatedAt: new Date().toISOString(),
@@ -565,13 +840,20 @@ export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
 
   const nameOf = (roomId: RoomId) => graph.rooms[roomId]?.name ?? namesBefore[roomId] ?? roomId;
   const afterAreas = leafAreas(afterLeaves);
-  const changes = summarizeChanges(patch.ops, beforeAreas, afterAreas, nameOf, addedRoomIds, {
+  const changes = summarizeChanges(remainingOps, beforeAreas, afterAreas, nameOf, addedRoomIds, {
     graph,
     openings: state.openings,
     addedOpeningIds,
   });
 
-  return { ok: true, doc: newDoc, changes };
+  return { ok: true, doc: newDoc, changes: [...levelChanges, ...changes] };
+}
+
+function buildGenerator(state: LevelState): Generator | undefined {
+  if (state.mode === "slicing") {
+    return state.tree ? { kind: "slicing", tree: state.tree } : undefined;
+  }
+  return { kind: "freeform", cells: state.cells, savedTree: state.savedTree };
 }
 
 export function createEmptyPlan(input: {

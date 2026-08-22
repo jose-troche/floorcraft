@@ -67,6 +67,51 @@ header.app-header h1 {
   color: var(--accent);
 }
 
+.level-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.freeform-badge {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 1rem;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+.tier-connections {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.quota-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  color: #7a1f1f;
+  background: #fde8e8;
+  border-bottom: 1px solid var(--danger);
+  padding: 0.5rem 0.75rem;
+}
+
+.stair-warning {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: #7a1f1f;
+  background: #fde8e8;
+  border: 1px solid var(--danger);
+  border-radius: 0.4rem;
+  padding: 0.4rem 0.6rem;
+}
+
 .spinner {
   width: 0.7rem;
   height: 0.7rem;

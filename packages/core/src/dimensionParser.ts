@@ -9,7 +9,7 @@
 
 import { activeLevel } from "./patch.js";
 import { solveSlicingTree } from "./slicingSolver.js";
-import type { DimensionType, PatchOp, PlanDocument, RoomId, Units } from "./types.js";
+import { generatorTree, type DimensionType, type PatchOp, type PlanDocument, type RoomId, type Units } from "./types.js";
 
 const MM_PER_FOOT = 304.8;
 const MM_PER_INCH = 25.4;
@@ -340,7 +340,7 @@ const matchRelative: Matcher = (clause, ctx) => {
 
 function roomRectOf(doc: PlanDocument, roomId: RoomId): { w: number; d: number } | null {
   const level = activeLevel(doc);
-  const tree = level.generator?.tree;
+  const tree = generatorTree(level);
   if (!tree) return null;
   const solved = solveSlicingTree(tree, level.boundary, doc.gridModule);
   if (!solved.ok) return null;

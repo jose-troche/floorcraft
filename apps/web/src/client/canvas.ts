@@ -16,6 +16,7 @@ import {
   activeLevel,
   applyPatch,
   planBoundaryResize,
+  planDetachedWallDrag,
   planLabelDrag,
   planOpeningDrag,
   planOpeningRotate,
@@ -369,9 +370,16 @@ export class CanvasView {
     const dy = (event.clientY - drag.startClient.y) * drag.mmPerPx;
     const nowMm = { x: drag.startMm.x + dx, y: drag.startMm.y + dy };
     switch (drag.kind) {
-      case "wall":
+      case "wall": {
         // A wall only travels along its own normal; movement on the other axis is noise.
-        return planWallDrag(drag.baseDoc, drag.edgeId!, drag.axis === "x" ? dx : dy);
+        const deltaMm = drag.axis === "x" ? dx : dy;
+        // A freeform level's walls can border cells that only partly span them (an
+        // L-shape's inner step), which planWallDrag's single-split-ratio model can't
+        // express — planDetachedWallDrag handles that generally instead.
+        return activeLevel(drag.baseDoc).generator?.kind === "freeform"
+          ? planDetachedWallDrag(drag.baseDoc, drag.edgeId!, deltaMm)
+          : planWallDrag(drag.baseDoc, drag.edgeId!, deltaMm);
+      }
       case "boundary":
         return planBoundaryResize(drag.baseDoc, drag.handle!, dx, dy);
       case "opening":
