@@ -189,7 +189,12 @@ main.layout {
 @media (max-width: 800px) {
   main.layout {
     grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
+    /* Both rows are capped, not just sized "auto": an uncapped chat/room list grows
+       without bound and squeezes the canvas row to zero height as messages and rooms
+       accumulate (it also starts cramped, since "auto" claims space greedily on the
+       first render too). Percentages resolve against main.layout's own height, which
+       is definite via #app's fixed 100vh, so the caps hold regardless of content. */
+    grid-template-rows: minmax(0, 45%) minmax(0, 1fr);
   }
 }
 
