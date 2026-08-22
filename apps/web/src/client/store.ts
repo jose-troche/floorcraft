@@ -3,6 +3,7 @@
 // (share links), FR-15 (last 50 patches for undo).
 
 import {
+  activeLevel,
   applyPatch,
   createEmptyPlan,
   formatAppliedTurn,
@@ -25,7 +26,8 @@ const HISTORY_LIMIT = 50;
 type StoredRecord = {
   id: string;
   doc: PlanDocument;
-  chatHistory: Turn[];
+  /** Chat history per level: only the history for the current active level is shown. */
+  chatHistoryByLevel: Record<string, Turn[]>;
   undoStack: PlanDocument[];
   redoStack: PlanDocument[];
   /** Set once the plan has been saved to D1; absent for a purely local plan. */
@@ -100,7 +102,10 @@ export class PlanStore {
         units: "imperial",
         boundary: { widthMm: 9144, depthMm: 12192 }, // 30x40 ft, a reasonable single-family default
       });
-      record = { id, doc, chatHistory: [], undoStack: [], redoStack: [] };
+      // Initialize chat history for all levels in the new plan
+      const chatHistoryByLevel: Record<string, Turn[]> = {};
+      for (const level of doc.levels) chatHistoryByLevel[level.id] = [];
+      record = { id, doc, chatHistoryByLevel, undoStack: [], redoStack: [] };
     }
     const store = new PlanStore(record);
     store.db = db;
@@ -114,12 +119,15 @@ export class PlanStore {
    * of someone else's plan on open would be the wrong default.
    */
   async adoptShared(input: { doc: PlanDocument; access: "read" | "edit"; id: string; token: string }): Promise<void> {
+    const doc = normalizeDocument(input.doc);
+    const chatHistoryByLevel: Record<string, Turn[]> = {};
+    for (const level of doc.levels) chatHistoryByLevel[level.id] = [];
     this.record = {
       id: input.doc.id,
       // Normalized again here (sync.ts's importJson already does it) so this method
       // stays safe to call from anywhere, not just its current one caller.
-      doc: normalizeDocument(input.doc),
-      chatHistory: [],
+      doc,
+      chatHistoryByLevel,
       undoStack: [],
       redoStack: [],
       cloudRef: input.access === "edit" ? { id: input.id, editToken: input.token, shareToken: "" } : undefined,
@@ -162,7 +170,20 @@ export class PlanStore {
     return this.record.doc;
   }
   get chatHistory(): readonly Turn[] {
-    return this.record.chatHistory;
+    const levelId = activeLevel(this.record.doc).id;
+    return this.record.chatHistoryByLevel[levelId] ?? [];
+  }
+
+  private addChatTurn(turn: Turn): void {
+    const levelId = activeLevel(this.record.doc).id;
+    if (!this.record.chatHistoryByLevel[levelId]) this.record.chatHistoryByLevel[levelId] = [];
+    this.record.chatHistoryByLevel[levelId]!.push(turn);
+  }
+
+  private initializeLevelChatHistories(doc: PlanDocument): void {
+    for (const level of doc.levels) {
+      if (!this.record.chatHistoryByLevel[level.id]) this.record.chatHistoryByLevel[level.id] = [];
+    }
   }
   get canUndo(): boolean {
     return this.record.undoStack.length > 0;
@@ -205,6 +226,7 @@ export class PlanStore {
     }
     this.pushUndo(prevDoc);
     this.record.doc = result.doc;
+    this.initializeLevelChatHistories(result.doc);
     await this.persist();
     this.sync?.schedule({ ops, source: "user" });
     this.emit();
@@ -213,8 +235,8 @@ export class PlanStore {
 
   async submitChatTurn(utterance: string): Promise<TurnResult> {
     if (this.readOnly) return { kind: "error", message: this.readOnlyReason! };
-    const historyBefore = [...this.record.chatHistory];
-    this.record.chatHistory.push({ role: "user", text: utterance });
+    const historyBefore = [...this.chatHistory];
+    this.addChatTurn({ role: "user", text: utterance });
 
     let outcome: Awaited<ReturnType<typeof resolveTurn>>;
     try {
@@ -241,7 +263,7 @@ export class PlanStore {
       return redone ? { kind: "applied", changes: ["Redone"] } : { kind: "noop" };
     }
     if (outcome.kind === "error") {
-      this.record.chatHistory.push({ role: "assistant", text: outcome.message });
+      this.addChatTurn({ role: "assistant", text: outcome.message });
       await this.persist();
       this.emit();
       return { kind: "error", message: outcome.message };
@@ -254,11 +276,12 @@ export class PlanStore {
       if (outcome.doc) {
         this.pushUndo(this.record.doc);
         this.record.doc = outcome.doc;
+        this.initializeLevelChatHistories(outcome.doc);
         this.sync?.schedule();
       }
       const applied = outcome.changes?.length ? `${outcome.changes.join(", ")}. ` : "";
       const text = `${applied}${outcome.question}`;
-      this.record.chatHistory.push({ role: "assistant", text });
+      this.addChatTurn({ role: "assistant", text });
       await this.persist();
       this.emit();
       return { kind: "clarify", question: outcome.question, options: outcome.options };
@@ -266,9 +289,10 @@ export class PlanStore {
 
     this.pushUndo(this.record.doc);
     this.record.doc = outcome.doc;
+    this.initializeLevelChatHistories(outcome.doc);
     const narration = outcome.kind === "provider" ? outcome.narration : undefined;
     const text = formatAppliedTurn({ changes: outcome.changes, narration, warnings: outcome.warnings });
-    this.record.chatHistory.push({ role: "assistant", text });
+    this.addChatTurn({ role: "assistant", text });
     await this.persist();
     this.sync?.schedule();
     this.emit();
