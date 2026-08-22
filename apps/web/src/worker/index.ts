@@ -18,6 +18,11 @@ import { handlePlans } from "./plans";
 const MODEL_CANDIDATES = ["@cf/meta/llama-3.2-3b-instruct", "@cf/meta/llama-3.2-1b-instruct"];
 const DEFAULT_MODEL = MODEL_CANDIDATES[0]!;
 const MAX_INFER_BODY_BYTES = 100_000;
+// Workers AI defaults max_tokens to 256 for these models, and these small instruct
+// models often preface the JSON with a sentence or two despite the system prompt
+// telling them not to — enough to truncate the patch mid-object and turn a perfectly
+// good answer into "response is not a JSON object". Give it real headroom.
+const MAX_OUTPUT_TOKENS = 768;
 
 function getIp(request: Request): string {
   return request.headers.get("cf-connecting-ip") ?? "0.0.0.0";
@@ -103,7 +108,7 @@ async function handleInfer(request: Request, env: Env): Promise<Response> {
   let firstError: Error | null = null;
   for (const model of models) {
     try {
-      aiResult = await env.AI.run(model, { messages, stream: true });
+      aiResult = await env.AI.run(model, { messages, stream: true, max_tokens: MAX_OUTPUT_TOKENS });
       break;
     } catch (e) {
       // Keep the first failure: it names the configured model, which is the one worth
