@@ -1,6 +1,10 @@
 name = "floorcraft"
 main = "src/worker/index.ts"
 compatibility_date = "2024-11-01"
+# Pinned so `wrangler deploy` skips the /memberships lookup it otherwise does to
+# resolve the account — that legacy endpoint 400s for scoped API tokens that lack
+# the old membership-read grant, even though the same token deploys fine directly.
+account_id = "6c462d438728c32315ee320490ab5c31"
 
 # Workers Static Assets — the SPA build (Vite output), served for anything that
 # isn't /api/* (specs.md §8.1: ASSETS is unbilled, unlimited on the free tier).
