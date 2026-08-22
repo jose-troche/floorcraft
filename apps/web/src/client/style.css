@@ -187,14 +187,23 @@ main.layout {
 }
 
 @media (max-width: 800px) {
+  /* Fitting header + chat + canvas into one fixed 100vh (as desktop does) leaves too
+     little for the canvas once the chat/room list has any real content — capping the
+     rows by percentage of that fixed height still tops out around a third of the
+     screen. Instead let the page scroll: the left panel gets a capped, independently
+     scrolling height, and the canvas gets a guaranteed minimum of its own further
+     down (on .canvas-shell), so it stays large regardless of what's above it. */
+  #app {
+    height: auto;
+    min-height: 100vh;
+  }
   main.layout {
     grid-template-columns: 1fr;
-    /* Both rows are capped, not just sized "auto": an uncapped chat/room list grows
-       without bound and squeezes the canvas row to zero height as messages and rooms
-       accumulate (it also starts cramped, since "auto" claims space greedily on the
-       first render too). Percentages resolve against main.layout's own height, which
-       is definite via #app's fixed 100vh, so the caps hold regardless of content. */
-    grid-template-rows: minmax(0, 45%) minmax(0, 1fr);
+    grid-template-rows: auto auto;
+  }
+  .left-panel {
+    max-height: 40vh;
+    overflow: hidden;
   }
 }
 
@@ -371,6 +380,13 @@ fieldset input, fieldset select {
   flex-direction: column;
   min-height: 0;
   position: relative;
+}
+
+@media (max-width: 800px) {
+  .canvas-shell {
+    flex: none;
+    min-height: 60vh;
+  }
 }
 
 .canvas-view-controls {
