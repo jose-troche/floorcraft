@@ -20,6 +20,7 @@ export * from "./providers/tier3.js";
 export * from "./providers/httpJsonProvider.js";
 export * from "./pdfExport.js";
 export * from "./intentMatcher.js";
+export * from "./examples.js";
 export * from "./dimensionParser.js";
 export * from "./orchestrator.js";
 export * from "./turnMessage.js";

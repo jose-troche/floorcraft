@@ -289,6 +289,52 @@ main.layout {
   max-height: 40vh;
   overflow-y: auto;
 }
+/* Example chips: one scrolling row rather than a wrapping block. The chat panel is
+   narrow and the examples are full sentences, so wrapping them would push the input
+   itself off a phone screen — the row scrolls sideways instead, and the input stays put
+   at a fixed height no matter how many examples the list grows to. */
+.chat-examples {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.5rem 0 0.15rem;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  /* Momentum scrolling on touch, and never a horizontal scrollbar on the page itself. */
+  -webkit-overflow-scrolling: touch;
+  /* Fades the trailing edge instead of guillotining a chip mid-word at the panel border.
+     Without it the row reads as broken layout rather than as "there is more this way",
+     which matters here because the examples are the one place teaching what chat accepts. */
+  mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent);
+}
+
+.chat-examples-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  flex: none;
+}
+
+.example-chip {
+  flex: none;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 1rem;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+.example-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.example-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .chat-disabled-note {
   font-size: 0.8rem;
   color: var(--muted);

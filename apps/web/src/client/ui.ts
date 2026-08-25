@@ -3,6 +3,7 @@
 // is simple and keeps the bundle under the NFR-2 budget.
 
 import {
+  EXAMPLE_REQUESTS,
   PROGRAM_COLORS,
   ROOM_PROGRAM_MIN_DIMENSIONS,
   activeLevel,
@@ -490,6 +491,13 @@ export class AppUI {
 
     const chatDisabled = providerState.activeId === null;
 
+    // Examples sit directly above the input, and only when there is no clarification
+    // waiting — two competing rows of chips would make it unclear which one answers the
+    // question just asked. They stay visible after the first message rather than only on
+    // an empty transcript: most of what they teach (counts, lists, exact sizes) is what
+    // someone reaches for on their third request, not their first.
+    if (!this.clarifyOptions) wrap.appendChild(this.renderExampleChips(input, chatDisabled));
+
     if (chatDisabled) {
       const note = document.createElement("div");
       note.className = "chat-disabled-note";
@@ -546,6 +554,44 @@ export class AppUI {
     row.appendChild(input);
     row.appendChild(send);
     wrap.appendChild(row);
+
+    return wrap;
+  }
+
+  /**
+   * Examples of what chat understands, as chips that load the text into the box rather
+   * than sending it. Loading rather than sending is the point: the value of "Add a kitchen
+   * of 8 x 5 feet" is learning that a size can be stated at all, and the user almost never
+   * wants those exact numbers — so the example arrives editable, with the cursor in it.
+   *
+   * The list is EXAMPLE_REQUESTS from core, shared with the message shown when a turn
+   * fails; every entry there is resolved by the deterministic layers, so these keep
+   * working even with no inference tier available.
+   */
+  private renderExampleChips(input: HTMLTextAreaElement, chatDisabled: boolean): HTMLElement {
+    const wrap = document.createElement("div");
+    wrap.className = "chat-examples";
+
+    const label = document.createElement("span");
+    label.className = "chat-examples-label";
+    label.textContent = "Try:";
+    wrap.appendChild(label);
+
+    for (const example of EXAMPLE_REQUESTS) {
+      const chip = document.createElement("button");
+      chip.className = "example-chip";
+      chip.type = "button";
+      chip.textContent = example.text;
+      chip.title = example.hint;
+      chip.disabled = chatDisabled || this.chatBusy;
+      chip.onclick = () => {
+        input.value = example.text;
+        input.focus();
+        // Cursor at the end, so typing continues the sentence instead of replacing it.
+        input.setSelectionRange(example.text.length, example.text.length);
+      };
+      wrap.appendChild(chip);
+    }
 
     return wrap;
   }

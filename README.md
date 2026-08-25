@@ -253,6 +253,12 @@ tier:
 | Relative resize | `reduce the kitchen by 40%`, `increase the kitchen width by 3 meters`, `reduce the length of the kitchen by 2 meters` |
 | Everything else | rename, swap, delete, undo/redo, change units |
 
+The chips above the chat box are `EXAMPLE_REQUESTS` in
+`packages/core/src/examples.ts`, and `test/examples.test.ts` asserts that every
+one of them resolves through this table with `provider: null`. That is the
+point of the list: the same examples are quoted back when a turn fails, so they
+have to work whether or not any inference tier is available.
+
 `left`/`right` cut vertically and `above`/`below` horizontally. `inside` is an
 approximation with a reason: a slicing tree is a guillotine partition and cannot
 enclose one room in another (that needs FR-11's L-shapes, Phase 3), so it
