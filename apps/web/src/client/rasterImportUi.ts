@@ -15,7 +15,7 @@ import {
 } from "@floorcraft/core";
 import { extractLineSegments } from "./rasterPipeline";
 
-type Stage = "pick" | "uploading" | "processing" | "review" | "error";
+type Stage = "pick" | "processing" | "review" | "error";
 
 export class RasterImportPanel {
   readonly element: HTMLElement;
@@ -32,7 +32,6 @@ export class RasterImportPanel {
   private levelName = "Imported Level";
 
   constructor(
-    private uploadsEnabled: boolean,
     private onImport: (ops: PatchOp[]) => void,
     private onClose: () => void,
   ) {
@@ -48,15 +47,11 @@ export class RasterImportPanel {
   }
 
   private async handleFile(file: File): Promise<void> {
-    this.setStage("uploading");
+    this.setStage("processing");
     try {
-      // Storing the source image is FR-20's requirement, not a dependency of processing
-      // (which always happens client-side, here) — a failed upload doesn't block import,
-      // it just means the original scan isn't kept for later reference.
-      if (this.uploadsEnabled) {
-        await fetch("/api/uploads", { method: "POST", headers: { "content-type": file.type }, body: file }).catch(() => {});
-      }
-
+      // FR-20: the source image is never uploaded anywhere. Detection is client-side, so
+      // the file is read straight off the local blob URL and only the vectorised result
+      // is ever persisted — the scan itself doesn't leave the browser.
       const url = URL.createObjectURL(file);
       const image = new Image();
       await new Promise<void>((resolve, reject) => {
@@ -142,17 +137,20 @@ export class RasterImportPanel {
       const note = document.createElement("p");
       note.className = "raster-import-note";
       note.textContent =
-        "Works best with a top-down scan or photo of a simple, mostly-orthogonal floor plan. " +
-        "Detection runs entirely in your browser — nothing is sent anywhere except the original image, " +
-        "which is only stored so you can come back to it.";
+        "Works best with a top-down scan or photo of a simple, mostly-orthogonal floor plan.";
       this.element.appendChild(note);
+      this.element.appendChild(renderPrivacyNote());
       return;
     }
 
-    if (this.stage === "uploading" || this.stage === "processing") {
+    if (this.stage === "processing") {
       const status = document.createElement("p");
-      status.textContent = this.stage === "uploading" ? "Uploading…" : "Detecting walls and rooms…";
+      status.textContent = "Detecting walls and rooms…";
       this.element.appendChild(status);
+      // Repeated here because this stage is the slow one (the detection engine is a
+      // multi-megabyte download on first use) — it's exactly when someone waiting on a
+      // spinner wonders where their floor plan just went.
+      this.element.appendChild(renderPrivacyNote());
       return;
     }
 
@@ -315,4 +313,37 @@ export class RasterImportPanel {
     wrap.appendChild(controls);
     return wrap;
   }
+}
+
+/**
+ * FR-20: detection is client-side and the source image is never uploaded. That is a real
+ * privacy property of this feature — someone scanning their own home should be told it
+ * plainly, at the moment they're choosing a file and again while they wait, rather than
+ * having to take it on trust.
+ */
+function renderPrivacyNote(): HTMLElement {
+  const note = document.createElement("p");
+  note.className = "raster-import-privacy";
+
+  const icon = document.createElement("span");
+  icon.className = "raster-import-privacy-icon";
+  icon.textContent = "\u{1F512}";
+  icon.setAttribute("aria-hidden", "true");
+  note.appendChild(icon);
+
+  const lead = document.createElement("strong");
+  lead.textContent = "Your floor plan image stays on this device.";
+  note.appendChild(lead);
+
+  // Deliberately says "become part of your plan, like any other edit" rather than implying
+  // the *result* is local too: with cloud sync on, the accepted walls sync to D1 exactly as
+  // a chat turn or a canvas drag would. The image is what never leaves — don't overclaim.
+  note.appendChild(
+    document.createTextNode(
+      " It is read straight from your computer and processed here in the browser — never " +
+        "uploaded, never stored on a server, and never sent to a language model. Only the " +
+        "walls and rooms you accept become part of your plan, like any other edit.",
+    ),
+  );
+  return note;
 }

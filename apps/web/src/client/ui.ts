@@ -165,31 +165,28 @@ export class AppUI {
 
     header.appendChild(this.renderLevelSwitcher());
 
-    if (this.providers.getConfig().rasterImportEnabled) {
-      const importBtn = document.createElement("button");
-      importBtn.textContent = "Import from image…";
-      importBtn.title = "Scan or photograph an existing floor plan and turn it into a new level (FR-20..FR-25)";
-      importBtn.onclick = () => {
-        // NFR-2: opencv.js is a multi-hundred-kilobyte-to-megabyte payload downstream of
-        // this — the whole raster-import module stays out of the main bundle until
-        // someone actually clicks this button.
-        void import("./rasterImportUi").then(({ RasterImportPanel }) => {
-          this.rasterImportPanel = new RasterImportPanel(
-            this.providers.getConfig().rasterImportEnabled === true,
-            (ops) => {
-              this.rasterImportPanel = null;
-              void this.runManual(ops);
-            },
-            () => {
-              this.rasterImportPanel = null;
-              this.render();
-            },
-          );
-          this.render();
-        });
-      };
-      header.appendChild(importBtn);
-    }
+    const importBtn = document.createElement("button");
+    importBtn.textContent = "Import from image…";
+    importBtn.title = "Scan or photograph an existing floor plan and turn it into a new level (FR-20..FR-25)";
+    importBtn.onclick = () => {
+      // NFR-2: opencv.js is a multi-hundred-kilobyte-to-megabyte payload downstream of
+      // this — the whole raster-import module stays out of the main bundle until
+      // someone actually clicks this button.
+      void import("./rasterImportUi").then(({ RasterImportPanel }) => {
+        this.rasterImportPanel = new RasterImportPanel(
+          (ops) => {
+            this.rasterImportPanel = null;
+            void this.runManual(ops);
+          },
+          () => {
+            this.rasterImportPanel = null;
+            this.render();
+          },
+        );
+        this.render();
+      });
+    };
+    header.appendChild(importBtn);
 
     const badge = document.createElement("span");
     badge.className = "tier-badge";

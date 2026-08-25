@@ -380,7 +380,7 @@ Dimension specifications MUST be parsed deterministically before the provider is
 
 ### 6.5 Raster import *(Phase 4, optional)*
 
-**FR-20** Import MUST run client-side (OpenCV.js/WASM). The uploaded image MUST be stored in R2; processing MUST NOT occur in a Worker.
+**FR-20** Import MUST run client-side (OpenCV.js/WASM); processing MUST NOT occur in a Worker. The source image MUST NOT be uploaded or stored server-side: detection reads it from a local blob URL, and only the vectorised result is persisted. (Amended from the original "MUST be stored in R2" — nothing read that copy back, and not taking it keeps a scan of someone's home in their browser.)
 **FR-21** Pipeline: deskew → adaptive threshold → morphological close → line segment detection → collinear merge → axis snap → wall graph construction → planar face traversal for room detection.
 **FR-22** Scale calibration MUST be a manual step: the user draws a line across a dimension of known length.
 **FR-23** A vision-model pass MAY be used for room labelling and topology sanity-checking; it MUST be optional and MUST NOT be required for a usable import.
@@ -411,7 +411,6 @@ Dimension specifications MUST be parsed deterministically before the provider is
 | `ASSETS` | Workers Static Assets | SPA, WASM | Unlimited, unbilled |
 | `DB` | D1 | plans, versions, quota | 5 M reads / 100 K writes per day, 5 GB |
 | `AI` | Workers AI | Tier 1 | 10,000 neurons/day, account-wide |
-| `UPLOADS` | R2 | P4 raster sources | 10 GB, 1 M/10 M ops per month |
 | `ANALYTICS` | Analytics Engine | usage + neuron accounting | Included |
 
 **CF-1** Workers KV MUST NOT be used for any write-path state (free tier allows ~1,000 writes/day — an autosaving editor exhausts this trivially). KV MAY be used for read-mostly configuration.
@@ -464,7 +463,6 @@ CREATE TABLE quota (
 | `GET` | `/api/plans/:id` | share or edit token | Returns opaque doc |
 | `PUT` | `/api/plans/:id` | edit token | Full replace; body ≤ 1 MB |
 | `POST` | `/api/plans/:id/versions` | edit token | Append patch |
-| `POST` | `/api/uploads` | client token | P4; returns R2 presigned PUT |
 | `ALL` | `/mcp` | bearer (optional module) | §10 |
 
 ### 8.4 Abuse controls

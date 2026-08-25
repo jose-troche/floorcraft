@@ -129,14 +129,8 @@ test("serves a strict CSP on API responses, that still permits the Blob-download
 });
 
 test("raster import entry point opens and closes cleanly, with no console errors (FR-20..FR-25)", async ({ page }) => {
-  // Needs the UPLOADS R2 binding configured (wrangler.toml's commented-out [[r2_buckets]]
-  // block) — the default local run doesn't have it, same reason the RTE-4 test below
-  // can't exercise Tier 1 without a live Turnstile secret. `wrangler dev --local`
-  // simulates R2 without any real Cloudflare resources, so uncommenting that block is
-  // enough to run this for real.
-  const config = await (await page.request.get("/api/config")).json();
-  test.skip(!config.rasterImportEnabled, "raster import (UPLOADS R2 binding) is not configured for this local run");
-
+  // No binding or server config gates this — import is entirely client-side (FR-20), so
+  // the entry point is present on every deployment.
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("/");
@@ -146,6 +140,9 @@ test("raster import entry point opens and closes cleanly, with no console errors
   await importBtn.click();
   await expect(page.getByRole("heading", { name: "Import from a floor plan image" })).toBeVisible();
   await expect(page.locator('input[type="file"]')).toBeVisible();
+  // FR-20's privacy property is only worth anything to a user if the UI states it, so the
+  // claim is pinned here rather than left to drift out of the panel unnoticed.
+  await expect(page.locator(".raster-import-privacy")).toContainText("never uploaded");
 
   await page.getByRole("button", { name: "Close" }).click();
   await expect(importBtn).toBeVisible();

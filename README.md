@@ -14,11 +14,11 @@ with L-shaped rooms, multi-storey levels with stair-alignment checking, IFC4
 and glTF export, and two more inference tiers — OpenRouter (Tier 2) and
 bring-your-own-key (Tier 3).
 
-Phase 4 ("Raster import", optional) adds scanning an existing floor plan
-image into a new, editable level: OpenCV.js line detection client-side,
-R2-backed image storage, manual scale calibration, and a reviewable
-per-wall accept/reject draft before anything is committed. Still deployable
-on Cloudflare's free tier.
+Phase 4 ("Raster import") adds scanning an existing floor plan image into a
+new, editable level: OpenCV.js line detection client-side, manual scale
+calibration, and a reviewable per-wall accept/reject draft before anything is
+committed. The source image never leaves the browser — no upload, no bucket,
+no server-side config — so this needs nothing beyond the base deployment.
 
 ## Layout
 
@@ -33,7 +33,7 @@ packages/core/   Pure TypeScript domain engine (no DOM, no network) — solver,
                  Reusable outside the web UI (spec §10, MCP server, Phase ≥2).
 apps/web/        Vite frontend (chat + manual editor + interactive canvas) and
                  the Cloudflare Worker (static assets, /api/config, /api/infer,
-                 /api/plans, /api/uploads).
+                 /api/plans).
 ```
 
 ## Phase 2 at a glance
@@ -185,7 +185,7 @@ left as a deliberate choice rather than made silently. See the comment in
 | Manual scale calibration (click two points, enter the real length) | FR-22 | `apps/web/src/client/rasterImportUi.ts` |
 | Per-wall accept/reject review before anything is committed | FR-25 | `apps/web/src/client/rasterImportUi.ts` |
 | Detached (no generator) result | FR-24 | `importLevel` op, `packages/core/src/patch.ts` |
-| Source image storage | FR-20 | `apps/web/src/worker/uploads.ts` (R2, `UPLOADS` binding) |
+| Source image never uploaded — read from a local blob URL | FR-20 | `apps/web/src/client/rasterImportUi.ts` (`handleFile`) |
 
 ### Architecture: FR-24's "detached level" is Phase 3's freeform generator
 
@@ -219,11 +219,10 @@ testing story:
   needs a browser, the ~8 MB WASM binary, and a real scanned floor plan to
   mean anything — the same reason Tier 0's on-device model and canvas
   gestures aren't in `packages/core`'s unit suite either. What *is* verified:
-  the R2 upload/retrieve round-trip (`apps/web/src/worker/uploads.ts`) works
-  against a real, locally-simulated bucket, and the import panel opens,
-  shows its file picker, and closes cleanly with no console errors — both as
-  a permanent Playwright test (`apps/web/e2e/canvas.spec.ts`, skips itself
-  when `UPLOADS` isn't configured for the local run). **Running the actual
+  the import panel opens, shows its file picker, and closes cleanly with no
+  console errors, as a permanent Playwright test
+  (`apps/web/e2e/canvas.spec.ts` — it needs no binding or server config, since
+  import is entirely client-side). **Running the actual
   OpenCV.js pipeline against a real scanned or photographed floor plan has
   not been done in this environment** — do that before relying on detection
   quality, the same discipline as the IFC/glTF exporters above.
@@ -392,15 +391,6 @@ Cloudflare account and to be logged in via `npx wrangler login` from
 4. **Enable Workers AI and Analytics Engine** for the account if not already
    (both are on by default for most accounts; Analytics Engine logging is
    best-effort — the Worker skips it silently if the binding is absent).
-
-4b. **Optional: create the R2 bucket for raster import** (FR-20, Phase 4):
-   ```bash
-   cd apps/web
-   npx wrangler r2 bucket create floorcraft-uploads
-   ```
-   Then uncomment the `[[r2_buckets]]` block in `wrangler.toml`. Without
-   this, `/api/config` reports `rasterImportEnabled: false` and the "Import
-   from image…" button doesn't appear — the rest of the app is unaffected.
 
 5. **Build and deploy**:
    ```bash

@@ -10,7 +10,6 @@ import { isRateLimited, PLAN_WRITE_LIMIT } from "./rateLimiter";
 import { readClientId, setClientIdCookie } from "./cookies";
 import { errorResponse } from "./redact";
 import { handlePlans } from "./plans";
-import { handleUploads } from "./uploads";
 import { withSecurityHeaders } from "./security";
 
 // Workers AI retires models on a published schedule, and a retired id fails the whole
@@ -39,9 +38,6 @@ async function handleConfig(env: Env): Promise<Response> {
       // The client only offers cloud sync and share links when D1 is actually bound;
       // without it, editing carries on against IndexedDB alone (ARC-3, RTE-4's spirit).
       cloudSyncEnabled: Boolean(env.DB) && env.CLOUD_SYNC_ENABLED !== "false",
-      // Raster import (FR-20, Phase 4) needs the UPLOADS R2 binding to exist; absent, the
-      // client hides the import entry point rather than offering a feature that 503s.
-      rasterImportEnabled: Boolean(env.UPLOADS),
     }),
     { headers: { "content-type": "application/json" } },
   );
@@ -160,17 +156,6 @@ async function route(request: Request, env: Env): Promise<Response> {
     const headers = new Headers(response.headers);
     setClientIdCookie(headers, clientId);
     return new Response(response.body, { status: response.status, headers });
-  }
-  if (url.pathname.startsWith("/api/uploads")) {
-    const ip = getIp(request);
-    // Images are much bigger than a plan-write autosave, and uploads only happen at the
-    // start of an import — the plan-write limit's higher ceiling isn't the right shape
-    // here, so this gets its own, tighter bucket.
-    if (request.method === "POST" && isRateLimited(`uploads:${ip}`, 20)) {
-      return errorResponse("Too many requests", 429, { reason: "rate_limited" });
-    }
-    const response = await handleUploads(request, env, url);
-    return response ?? errorResponse("Not found", 404);
   }
   if (url.pathname.startsWith("/api/")) {
     return errorResponse("Not found", 404);

@@ -597,6 +597,34 @@ fieldset input, fieldset select {
   max-width: 46em;
 }
 
+/* The one genuinely reassuring thing about this feature (FR-20: the image never leaves
+   the browser), so it gets a callout rather than another line of muted small print. */
+.raster-import-privacy {
+  /* Block, not flex: the lead <strong> and the body text that follows it are one
+     paragraph and must wrap as one. As flex items they'd sit side by side and each
+     wrap in its own column. */
+  display: block;
+  max-width: 46em;
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--fg);
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 0.3rem;
+}
+
+.raster-import-privacy strong {
+  /* Keeps the lead sentence on the same line as the body text it introduces. */
+  font-weight: 600;
+}
+
+.raster-import-privacy-icon {
+  margin-right: 0.4rem;
+}
+
 .raster-review {
   display: flex;
   flex-direction: column;
