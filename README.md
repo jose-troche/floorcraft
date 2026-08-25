@@ -248,8 +248,9 @@ tier:
 |---|---|
 | Placement | `add a kitchen to the left of the office`, `add a bedroom above the kitchen`, `add a closet inside the office`, `add a pantry next to the kitchen`, `move the kitchen to the right of the office` |
 | Creation with size | `add a room 3 x 4 ft`, `add a bedroom 12x14 feet to the left of the office` |
+| Several rooms at once | `add a kitchen, a living room and a family room`, `add three bedrooms`, `add a couple of bathrooms`, `add a pantry and a closet next to the kitchen` |
 | Pinning a size | `kitchen is 4x5 feet`, `make the hallway 3 feet wide`, `living room at least 300 sq ft` |
-| Relative resize | `reduce the kitchen by 40%`, `increase the kitchen width by 3 meters`, `increase the office length by 30%` |
+| Relative resize | `reduce the kitchen by 40%`, `increase the kitchen width by 3 meters`, `reduce the length of the kitchen by 2 meters` |
 | Everything else | rename, swap, delete, undo/redo, change units |
 
 `left`/`right` cut vertically and `above`/`below` horizontally. `inside` is an
@@ -264,8 +265,13 @@ swapping, resizing, and to the anchor room in a placement. A request naming a
 room that doesn't exist, or a kind of room that isn't recognised, also asks.
 These questions are deliberately *not* forwarded to a provider — a model asked
 "which bedroom?" answers by picking one, which is the guess being avoided.
-Multi-room requests (`add a kitchen, a living room and two bedrooms`) still go
-to a provider, which can express the whole request rather than half of it.
+Multi-room requests are expanded here rather than forwarded — but only when every
+part reads exactly. `add a kitchen, a living room and two bedrooms` becomes four
+`addRoom` ops; `add a few bedrooms` (no defensible count), `add a kitchen and
+paint the walls blue` (a fragment that is not a room), and `add a kitchen 8x5 ft
+and a bath` (one size, two rooms) all go to a provider instead. Adding two of
+the three rooms someone asked for is the same wrong-inference failure as adding
+the wrong one.
 
 ### DXF golden fixture (FR-17)
 

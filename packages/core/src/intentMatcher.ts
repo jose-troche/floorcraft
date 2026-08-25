@@ -1,8 +1,8 @@
 // Deterministic intent matcher — specs.md §5.1 (INF-5). Tried before any provider
 // call. Target: >= 35% of turns resolved with zero inference. Handles: rename,
-// resize by percentage/area, swap, delete, add room (with a program, optional
-// dimensions, and optional placement relative to another room), move, undo/redo,
-// change units.
+// resize by percentage/area, swap, delete, add rooms (one or several, with a program,
+// an optional count, optional dimensions, and optional placement relative to another
+// room), move, undo/redo, change units.
 //
 // The governing rule here is that a *partial* understanding is never promoted to a
 // guess. Fuzzy room matching used to return the best-scoring candidate, so "delete the
@@ -225,13 +225,95 @@ function patch(ops: Patch["ops"]): IntentResult {
 // ------------------------------------------------------------------ add room
 
 /**
- * A creation request that names several rooms, or a count, is beyond what this matcher
- * can honour exactly — and getting it half-right (one room out of three, or one bedroom
- * where two were asked for) is precisely the wrong-inference failure. These go to the
- * provider, which can express the whole request.
+ * Marks a creation request that names several rooms, or a count of them, so it is read by
+ * parseRoomList rather than as a single room. Anything this flags that parseRoomList
+ * cannot read exactly goes to the provider: getting it half-right (one room out of three,
+ * or one bedroom where two were asked for) is precisely the wrong-inference failure.
  */
 const LIST_OR_COUNT =
   /,|\band\b|\b\d+\b|\b(?:two|three|four|five|six|seven|eight|nine|ten|couple|several|few)\b/i;
+
+const COUNT_WORDS: Record<string, number> = {
+  a: 1,
+  an: 1,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+};
+
+/**
+ * A quantifier with no correct number behind it. "a few bedrooms" has no reading this
+ * matcher can defend, so those segments fail the list and the turn goes to a provider
+ * (or, with no provider, comes back as a question) rather than inventing a count.
+ */
+const VAGUE_QUANTIFIER = /^(?:several|some|many|a\s+few|few|lots\s+of|multiple)\b/;
+
+/**
+ * Ceiling on one turn's worth of rooms. A slip of the keyboard ("add 200 bedrooms")
+ * should not spend a minute in the solver producing a plan nobody asked for.
+ */
+const MAX_ROOMS_PER_TURN = 12;
+
+type RoomRequest = { program: RoomProgram; count: number };
+
+/**
+ * Pulls a leading count off one segment: "three bedrooms" -> 3, "a couple of baths" -> 2,
+ * a bare "kitchen" -> 1.
+ */
+function extractCount(text: string): { count: number; rest: string } {
+  const numeric = /^(\d+)\s+(.+)$/.exec(text);
+  if (numeric) return { count: Number(numeric[1]), rest: numeric[2]! };
+  const pair = /^(?:a\s+)?(?:couple|pair)\s+(?:of\s+)?(.+)$/.exec(text);
+  if (pair) return { count: 2, rest: pair[1]! };
+  const word = /^([a-z]+)\s+(.+)$/.exec(text);
+  const counted = word ? COUNT_WORDS[word[1]!] : undefined;
+  if (word && counted !== undefined) return { count: counted, rest: word[2]! };
+  return { count: 1, rest: text };
+}
+
+/** Reads one segment of a list — "a living room", "three bedrooms" — or fails. */
+function parseRoomRequest(segment: string): RoomRequest | null {
+  const normalized = normalize(segment);
+  if (!normalized || VAGUE_QUANTIFIER.test(normalized)) return null;
+  const { count, rest } = extractCount(normalized.replace(/^(?:another|the)\s+/, ""));
+  if (!Number.isInteger(count) || count < 1) return null;
+  const program = findProgram(rest);
+  return program ? { program, count } : null;
+}
+
+/**
+ * Reads "a kitchen, a living room and three bedrooms" as a list of programs and counts.
+ * All-or-nothing on purpose: one unreadable segment fails the whole list, because adding
+ * the two rooms out of three that happened to parse is worse than not acting at all —
+ * the user would have to work out which of their rooms went missing.
+ */
+function parseRoomList(text: string): RoomRequest[] | null {
+  const segments = text
+    .split(/\s*(?:,|;|\band\b|\bplus\b)\s*/i)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (segments.length === 0) return null;
+
+  const requests: RoomRequest[] = [];
+  let total = 0;
+  for (const segment of segments) {
+    const request = parseRoomRequest(segment);
+    if (!request) return null;
+    total += request.count;
+    if (total > MAX_ROOMS_PER_TURN) return null;
+    requests.push(request);
+  }
+  // A single room with no count is the plain "add a kitchen" case, which the caller
+  // already handles — and handles better, since it also reads dimensions and filler.
+  return total > 1 ? requests : null;
+}
 
 const ADD_PREFIX = /^(?:please\s+)?(?:add|create|insert|put)\s+(?:(?:a|an|another|the)\s+)?/i;
 
@@ -308,6 +390,25 @@ function matchAddRoom(doc: PlanDocument, utterance: string): IntentResult {
 
   const dimensions = extractDimensions(rest, doc.units);
   if (dimensions) rest = dimensions.rest;
+
+  // Several rooms or a count of them. Read before the filler strip below, which would
+  // eat the "of" out of "a couple of bedrooms". Skipped when the request also states a
+  // size: "8x5" describes one room, and there is no honest way to spread it over a list.
+  if (!dimensions && LIST_OR_COUNT.test(rest)) {
+    const list = parseRoomList(rest);
+    if (!list) return null; // Not readable exactly — provider territory.
+    return patch(
+      list.flatMap(({ program, count }) =>
+        Array.from({ length: count }, () => ({
+          op: "addRoom" as const,
+          program,
+          areaWeight: DEFAULT_AREA_WEIGHT[program],
+          adjacentTo,
+          direction: adjacentTo ? direction : undefined,
+        })),
+      ),
+    );
+  }
 
   // Strip filler left behind by the dimension phrase ("a room that is 3x4 ft").
   rest = rest.replace(/\b(?:that\s+is|which\s+is|measuring|sized|of|is|a|an)\b/gi, " ").replace(/\s+/g, " ").trim();

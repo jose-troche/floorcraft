@@ -287,12 +287,52 @@ describe("asking instead of guessing", () => {
     expect(Object.keys(activeLevel(doc).graph.rooms)).toHaveLength(3);
   });
 
-  it("keeps multi-room creation on the provider path rather than half-doing it", () => {
+  it("expands multi-room creation into one op per room", () => {
+    const result = matchDeterministicIntent(plan(), "add a kitchen, a living room and two bedrooms");
+    expect(result?.kind).toBe("patch");
+    if (result?.kind !== "patch") return;
+    expect(result.patch.ops.map((op) => (op as { program: string }).program)).toEqual([
+      "kitchen",
+      "living",
+      "bedroom",
+      "bedroom",
+    ]);
+  });
+
+  it("expands a bare count into that many rooms", () => {
+    for (const [utterance, count] of [
+      ["add 2 bedrooms", 2],
+      ["add three bedrooms", 3],
+      ["add a couple of bathrooms", 2],
+    ] as const) {
+      const result = matchDeterministicIntent(plan(), utterance);
+      expect(result?.kind, utterance).toBe("patch");
+      if (result?.kind !== "patch") continue;
+      expect(result.patch.ops, utterance).toHaveLength(count);
+    }
+  });
+
+  it("keeps a multi-room request on the provider path when it cannot be read exactly", () => {
     // Getting one room out of three, or one bedroom where two were asked for, is exactly
-    // the wrong-inference failure — these must reach a model that can express the whole
-    // request instead.
-    for (const utterance of ["add a kitchen, a living room and two bedrooms", "add 2 bedrooms"]) {
+    // the wrong-inference failure — anything this matcher cannot expand in full must
+    // reach a model that can express the whole request instead.
+    for (const utterance of [
+      "add a kitchen and paint the walls blue", // a segment that is not a room at all
+      "add a few bedrooms", // no defensible count
+      "add 200 bedrooms", // past the per-turn ceiling
+      "add a kitchen 8x5 ft and a bath", // one size, two rooms — no honest way to split it
+    ]) {
       expect(matchDeterministicIntent(plan(), utterance), utterance).toBeNull();
+    }
+  });
+
+  it("applies a stated placement to every room in a list", () => {
+    const result = matchDeterministicIntent(plan(), "add a pantry and a closet next to the office");
+    expect(result?.kind).toBe("patch");
+    if (result?.kind !== "patch") return;
+    expect(result.patch.ops).toHaveLength(2);
+    for (const op of result.patch.ops) {
+      expect(op).toMatchObject({ op: "addRoom", adjacentTo: "office" });
     }
   });
 });

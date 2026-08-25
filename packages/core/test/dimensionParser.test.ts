@@ -53,6 +53,19 @@ describe("parseDimensions — the DIM-2 patterns", () => {
     expect(op.value).toBeGreaterThan(2000);
   });
 
+  it("reads a relative change with the axis fronted, the same as with it trailing", () => {
+    // "reduce the length of the kitchen by 2 m" and "reduce the kitchen length by 2 m"
+    // are the same request in ordinary English. Only understanding one of them meant
+    // sending the other to a model to re-derive a length the user had already stated.
+    const doc = plan("metric");
+    const fronted = parseDimensions(doc, "reduce the length of the kitchen by 2 meters");
+    const trailing = parseDimensions(doc, "reduce the kitchen length by 2 meters");
+    expect(fronted.ops).toHaveLength(1);
+    expect(fronted.ops).toEqual(trailing.ops);
+    expect(fronted.ops[0]).toMatchObject({ op: "setDimension", roomId: "kitchen", dimensionType: "depth" });
+    expect(fronted.remainder).toBe("");
+  });
+
   it("handles several constraints in one utterance", () => {
     const result = parseDimensions(plan(), "bathroom 5x8, kitchen 8x12 feet");
     const rooms = result.ops.map((o) => (o as { roomId: string }).roomId);

@@ -296,27 +296,53 @@ const matchSingleAxis: Matcher = (clause, ctx) => {
   };
 };
 
+const RELATIVE_VERB = "(increase|decrease|reduce|grow|shrink|expand)";
+const RELATIVE_AXIS = "(width|depth|length|long)";
+const RELATIVE_AMOUNT = `(${NUMBER})\\s*(%|percent|${UNIT_PATTERN})?`;
+
+/** "increase the bedroom depth by 2 m" — the room named before the axis it owns. */
+const RELATIVE_ROOM_FIRST = new RegExp(
+  `^(?:please\\s+)?${RELATIVE_VERB}\\s+(?:the\\s+)?(.*?)\\s*(?:'s)?\\s*${RELATIVE_AXIS}\\s*(?:by)\\s*${RELATIVE_AMOUNT}\\s*$`,
+  "i",
+);
+
 /**
- * "increase the bedroom depth by 2 meters", "increase office length by 30%" — relative,
- * so the current geometry is measured first and the result pinned as an absolute value.
- * A percentage scales the current dimension; a length adds to it.
+ * "reduce the length of the kitchen by 2 meters" — the same request with the axis
+ * fronted. Both readings are ordinary English and neither is more precise than the
+ * other, so a parser that only understood one was sending the other to a model to
+ * re-derive a length the user had already stated exactly (DIM-5).
+ */
+const RELATIVE_AXIS_FIRST = new RegExp(
+  `^(?:please\\s+)?${RELATIVE_VERB}\\s+(?:the\\s+)?${RELATIVE_AXIS}\\s+of\\s+(?:the\\s+)?(.*?)\\s*(?:by)\\s*${RELATIVE_AMOUNT}\\s*$`,
+  "i",
+);
+
+/**
+ * "increase the bedroom depth by 2 meters", "increase office length by 30%", "reduce the
+ * length of the kitchen by 2 m" — relative, so the current geometry is measured first and
+ * the result pinned as an absolute value. A percentage scales the current dimension; a
+ * length adds to it.
  */
 const matchRelative: Matcher = (clause, ctx) => {
-  const pattern = new RegExp(
-    `^(?:please\\s+)?(increase|decrease|reduce|grow|shrink|expand)\\s+(?:the\\s+)?(.*?)\\s*(?:'s)?\\s*` +
-      `(width|depth|length|long)\\s*(?:by)\\s*(${NUMBER})\\s*(%|percent|${UNIT_PATTERN})?\\s*$`,
-    "i",
-  );
-  const m = pattern.exec(clause.text.trim());
+  const text = clause.text.trim();
+  // Axis-first is tried first: its "<axis> of <room>" shape is the more specific of the
+  // two, and room-first's lazy `(.*?)` would otherwise swallow "the length of the" as
+  // the room name and then fail to find a room by it.
+  const axisFirst = RELATIVE_AXIS_FIRST.exec(text);
+  const m = axisFirst ?? RELATIVE_ROOM_FIRST.exec(text);
   if (!m) return null;
-  const room = findRoom(ctx.rooms, m[2]!);
+  // The two patterns differ only in which of groups 2/3 is the room and which the axis.
+  const roomText = axisFirst ? m[3]! : m[2]!;
+  const axisWord = axisFirst ? m[2]! : m[3]!;
+
+  const room = findRoom(ctx.rooms, roomText);
   if (!room) return null;
 
   const rect = roomRectOf(ctx.doc, room.roomId);
   if (!rect) return null;
   // "length" and "long" describe the front-to-back extent, matching how matchSingleAxis
   // already reads "deep"/"long".
-  const axis: "width" | "depth" = /^width$/i.test(m[3]!) ? "width" : "depth";
+  const axis: "width" | "depth" = /^width$/i.test(axisWord) ? "width" : "depth";
   const current = axis === "width" ? rect.w : rect.d;
   const shrinking = /decrease|reduce|shrink/i.test(m[1]!);
   const amount = Number(m[4]);
