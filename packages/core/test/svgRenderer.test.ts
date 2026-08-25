@@ -104,4 +104,8 @@ describe("formatLength", () => {
   it("formats metric as meters", () => {
     expect(formatLength(3660, "metric")).toBe("3.66 m");
   });
+  it("carries a rounded-up 12 inches into the feet", () => {
+    // 6704mm is 21'-11.94" — it must not print as 21'-12".
+    expect(formatLength(6704, "imperial")).toBe("22'-0\"");
+  });
 });

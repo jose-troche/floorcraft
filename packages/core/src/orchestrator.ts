@@ -12,17 +12,24 @@
 import { applyPatch } from "./patch.js";
 import { matchDeterministicIntent } from "./intentMatcher.js";
 import { buildPlanSummary } from "./planSummary.js";
-import { checkConstraintsPossible, parseDimensions, type DimensionWarning } from "./dimensionParser.js";
+import { checkConstraintsPossible, parseDimensions } from "./dimensionParser.js";
 import { unrecognizedRequestMessage } from "./examples.js";
 import type { PlanDocument, Turn } from "./types.js";
 import type { PlanProvider } from "./providers/types.js";
 import { CORE_PATCH_OPS, FREEFORM_PATCH_OPS, FULL_PATCH_OPS, validatePatchResponse } from "./providers/schema.js";
 
+/**
+ * A caveat on a turn that otherwise applied. Two kinds reach it: a unit the dimension
+ * parser had to assume (DIM-3), and a dimension the layout could not deliver (SLV-7).
+ * Only the message is carried, so the two sources can be concatenated freely.
+ */
+export type TurnWarning = { message: string };
+
 export type TurnOutcome =
-  | { kind: "deterministic"; doc: PlanDocument; changes: string[]; warnings?: DimensionWarning[] }
+  | { kind: "deterministic"; doc: PlanDocument; changes: string[]; warnings?: TurnWarning[] }
   | { kind: "undo" }
   | { kind: "redo" }
-  | { kind: "provider"; doc: PlanDocument; changes: string[]; narration?: string; providerId: string; warnings?: DimensionWarning[] }
+  | { kind: "provider"; doc: PlanDocument; changes: string[]; narration?: string; providerId: string; warnings?: TurnWarning[] }
   /**
    * The request was understood in shape but not in target — which room, or what kind of
    * room. The plan is untouched and the user is asked exactly one question (FR-5).
@@ -57,7 +64,9 @@ export async function resolveTurn(
 
   const dimensions = parseDimensions(doc, utteranceRaw);
   const dimensionChanges: string[] = [];
-  const warnings = dimensions.warnings;
+  // Dimension-parse warnings (an assumed unit) and layout warnings (a pin the partition
+  // could not deliver, SLV-7) are both caveats on the same turn, so they travel together.
+  const warnings: { message: string }[] = [...dimensions.warnings];
   let workingDoc = doc;
 
   if (dimensions.ops.length > 0) {
@@ -67,6 +76,7 @@ export async function resolveTurn(
     if (!applied.ok) return { kind: "error", message: describeApplyFailure(applied) };
     workingDoc = applied.doc;
     dimensionChanges.push(...applied.changes);
+    warnings.push(...(applied.warnings ?? []));
   }
 
   const utterance = dimensions.ops.length > 0 ? dimensions.remainder : utteranceRaw;
@@ -93,7 +103,14 @@ export async function resolveTurn(
       };
     }
     const result = applyPatch(workingDoc, intent.patch);
-    if (result.ok) return { kind: "deterministic", doc: result.doc, changes: [...dimensionChanges, ...result.changes], warnings };
+    if (result.ok) {
+      return {
+        kind: "deterministic",
+        doc: result.doc,
+        changes: [...dimensionChanges, ...result.changes],
+        warnings: [...warnings, ...(result.warnings ?? [])],
+      };
+    }
     return { kind: "error", message: describeApplyFailure(result) };
   }
 
@@ -139,7 +156,13 @@ export async function resolveTurn(
     if (!parsed.ok) return { ok: false as const, failure: "validation" as const, error: parsed.error };
     const applied = applyPatch(doc_, parsed.patch);
     if (!applied.ok) return { ok: false as const, failure: "validation" as const, error: describeApplyFailure(applied) };
-    return { ok: true as const, patch: parsed.patch, doc: applied.doc, changes: applied.changes };
+    return {
+      ok: true as const,
+      patch: parsed.patch,
+      doc: applied.doc,
+      changes: applied.changes,
+      warnings: applied.warnings ?? [],
+    };
   };
 
   let result = await attempt();
@@ -174,6 +197,6 @@ export async function resolveTurn(
     changes: [...dimensionChanges, ...result.changes],
     narration: result.patch.narration,
     providerId: provider.id,
-    warnings,
+    warnings: [...warnings, ...result.warnings],
   };
 }

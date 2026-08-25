@@ -3,7 +3,7 @@
 // area rooms (SLV-1), enforcing per-program minimum dimensions and grid-snapped
 // centerlines (SLV-2 required tiers). Unsatisfiable minimums fail structured (SLV-3).
 
-import type { NodePath, Rect, RoomId, SlicingTree, SolveViolation } from "./types.js";
+import type { NodePath, Rect, RoomId, SlicingLeaf, SlicingTree, SolveViolation } from "./types.js";
 import { ROOM_PROGRAM_MIN_DIMENSIONS } from "./types.js";
 
 // Rect itself lives in types.ts (RoomCell reuses it for the freeform generator); not
@@ -27,8 +27,37 @@ export type CutLine = {
   max: number;
 };
 
+/**
+ * A dimension the user pinned that the solved layout could not deliver (SLV-7).
+ *
+ * Deliberately not a `SolveViolation`: a slicing tree tiles its boundary with no gaps, so
+ * a leaf's extent is only ever as free as the rooms around it leave it. The only room on
+ * a level has to fill that level whatever size was asked for, and a room inside a split
+ * gets to name only the axis its parent cuts. Failing the patch over that would make
+ * "add a kitchen of 8x5 feet" impossible to say as the first thing in a plan; drawing the
+ * 30x40 ft room it silently becomes is how a plan ends up labelled 1200 sq ft when 40 was
+ * asked for. So the room is placed and the shortfall is handed back for the caller to say
+ * out loud, which is what SLV-7 asks for.
+ */
+export type UnmetConstraint = {
+  roomId: RoomId;
+  axis: "width" | "depth";
+  /** What the user pinned, mm. */
+  requestedMm: number;
+  /** What the partition could actually give it, mm. */
+  actualMm: number;
+};
+
+/**
+ * Slack allowed before a pinned dimension counts as unmet. Unit conversion lands on whole
+ * millimetres (8 ft is 2438.4mm, stored as 2438) while the per-program minimums nearby are
+ * round numbers (a kitchen's 2440mm), so a pin can miss by a millimetre or two in a way
+ * nobody can see: display precision is a tenth of a foot, or 30mm.
+ */
+const EXACT_TOLERANCE_MM = 10;
+
 export type SlicingSolveResult =
-  | { ok: true; leaves: LeafRect[]; cuts: CutLine[] }
+  | { ok: true; leaves: LeafRect[]; cuts: CutLine[]; unmet: UnmetConstraint[] }
   | { ok: false; violations: SolveViolation[] };
 
 type MinSize = { w: number; d: number };
@@ -58,14 +87,29 @@ function computeMin(node: SlicingTree): MinSize {
 }
 
 /**
- * The size this subtree demands along `axis`, if it pins one. Only a leaf can pin a
- * dimension; a split's extent is the sum of what its children negotiate, which the
- * recursion below settles on its own.
+ * The size this subtree demands along `axis`, if it pins one.
+ *
+ * A leaf pins whatever the user pinned on it. A split pins along the axis it does *not*
+ * cut: children of a vertical cut sit side by side and each spans the parent's full depth,
+ * so a depth pinned anywhere inside is a depth pinned on the whole subtree. Along its own
+ * cut axis a split pins nothing — that extent is the sum of what its children negotiate,
+ * which the recursion below settles on its own.
+ *
+ * Stopping at the split (the obvious reading of "only a leaf has an exact size") is what
+ * made a pin evaporate as soon as a second room joined the pinned one: putting a pantry
+ * under a 10x12 ft kitchen buried the kitchen one level deeper, and the outer cut then saw
+ * a split where it used to see the leaf, fell back to area weights, and quietly widened the
+ * kitchen to 13 ft. A pin the user stated should survive its room gaining a neighbour.
  */
 function exactSize(node: SlicingTree, axis: "w" | "d"): number | null {
-  if (node.kind !== "leaf") return null;
-  const value = axis === "w" ? node.exactWidth : node.exactDepth;
-  return value !== undefined && value > 0 ? value : null;
+  if (node.kind === "leaf") {
+    const value = axis === "w" ? node.exactWidth : node.exactDepth;
+    return value !== undefined && value > 0 ? value : null;
+  }
+  if (axis === (node.axis === "v" ? "w" : "d")) return null;
+  // Two children pinning the same axis to different values is a genuine conflict; the
+  // first wins here and the loser is reported by unmetConstraints once the solve lands.
+  return exactSize(node.children[0], axis) ?? exactSize(node.children[1], axis);
 }
 
 function snapWithinRange(value: number, lo: number, hi: number, grid: number): number {
@@ -77,6 +121,43 @@ function snapWithinRange(value: number, lo: number, hi: number, grid: number): n
   if (upFromLo <= hi) return upFromLo;
   if (downFromHi >= lo) return downFromHi;
   return Math.min(Math.max(value, lo), hi);
+}
+
+function collectLeafNodes(node: SlicingTree, out: Map<RoomId, SlicingLeaf>): void {
+  if (node.kind === "leaf") {
+    out.set(node.roomId, node);
+    return;
+  }
+  collectLeafNodes(node.children[0], out);
+  collectLeafNodes(node.children[1], out);
+}
+
+/**
+ * Checks each pinned dimension against the rectangle the solve actually produced. This is
+ * the only place the two are compared: `snapCutLines` reads a pin while placing a *cut*,
+ * so nothing there ever looks at a leaf that had no cut to influence — the root leaf of a
+ * one-room level, or the axis its parent split does not divide.
+ */
+function unmetConstraints(tree: SlicingTree, leaves: readonly LeafRect[]): UnmetConstraint[] {
+  const nodes = new Map<RoomId, SlicingLeaf>();
+  collectLeafNodes(tree, nodes);
+
+  const unmet: UnmetConstraint[] = [];
+  for (const leaf of leaves) {
+    const node = nodes.get(leaf.roomId);
+    if (!node) continue;
+    // The `> 0` guard mirrors exactSize: a zero or negative pin is not a pin.
+    const pins = [
+      { axis: "width" as const, pinned: node.exactWidth, actual: leaf.w },
+      { axis: "depth" as const, pinned: node.exactDepth, actual: leaf.d },
+    ];
+    for (const { axis, pinned, actual } of pins) {
+      if (pinned === undefined || pinned <= 0) continue;
+      if (Math.abs(actual - pinned) <= EXACT_TOLERANCE_MM) continue;
+      unmet.push({ roomId: leaf.roomId, axis, requestedMm: pinned, actualMm: actual });
+    }
+  }
+  return unmet;
 }
 
 function collectRoomIds(node: SlicingTree, out: RoomId[]): void {
@@ -185,7 +266,7 @@ export function solveSlicingTree(
   }
   if (violations.length > 0) return { ok: false, violations };
 
-  return { ok: true, leaves, cuts };
+  return { ok: true, leaves, cuts, unmet: unmetConstraints(tree, leaves) };
 }
 
 /** Smallest boundary that can hold this tree — the floor for an outer-boundary resize drag. */

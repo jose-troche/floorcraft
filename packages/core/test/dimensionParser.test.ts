@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { activeLevel, applyPatch, createEmptyPlan } from "../src/patch.js";
+import { solveSlicingTree } from "../src/slicingSolver.js";
+import { generatorTree } from "../src/types.js";
 import { checkConstraintsPossible, parseDimensions } from "../src/dimensionParser.js";
 import { resolveTurn } from "../src/orchestrator.js";
 import type { PatchOp, PlanDocument, Units } from "../src/types.js";
@@ -267,5 +269,56 @@ describe("dimension utterance fixture coverage", () => {
       const result = applyPatch(doc, { ops, source: "deterministic" });
       expect(result.ok || Boolean(result.violations), `"${utterance}" produced a malformed patch`).toBe(true);
     }
+  });
+});
+
+/**
+ * The reported bug: "add a kitchen of 8 x 5 feet" drew a room labelled 1200 sq ft — the
+ * whole 30x40 ft default footprint — because a pinned size was only ever consulted while
+ * placing a *cut*, and the only room on a level has no cut to place. The units were
+ * always read correctly; the size was dropped after parsing, not mistranslated.
+ */
+describe("a size stated when adding a room (FR-2, SLV-7)", () => {
+  const house = () =>
+    createEmptyPlan({ id: "p", title: "T", units: "imperial", boundary: { widthMm: 9144, depthMm: 12192 } });
+
+  function roomRect(doc: PlanDocument, name: string) {
+    const level = activeLevel(doc);
+    const solved = solveSlicingTree(generatorTree(level)!, level.boundary, doc.gridModule);
+    if (!solved.ok) throw new Error("unsolved");
+    const roomId = Object.entries(level.graph.rooms).find(([, r]) => r.name === name)![0];
+    return solved.leaves.find((l) => l.roomId === roomId)!;
+  }
+
+  it("reads 8 x 5 feet as 8 x 5 feet", async () => {
+    const outcome = await resolveTurn(house(), "add a kitchen of 8 x 5 feet", [], null);
+    expect(outcome.kind).toBe("deterministic");
+    if (outcome.kind !== "deterministic") return;
+    const constraints = Object.values(activeLevel(outcome.doc).graph.rooms)[0]!.constraints;
+    expect(constraints).toEqual({ width: { exact: 2438 }, depth: { exact: 1524 } });
+  });
+
+  it("says so rather than silently drawing the whole floor as the kitchen", async () => {
+    const outcome = await resolveTurn(house(), "add a kitchen of 8 x 5 feet", [], null);
+    expect(outcome.kind).toBe("deterministic");
+    if (outcome.kind !== "deterministic") return;
+    // The room is still added — SLV-7 asks for the conflict to be reported, not for the
+    // turn to be refused, so a sized room can still be the first thing said about a plan.
+    expect(outcome.changes).toContain("Added Kitchen");
+    const warned = (outcome.warnings ?? []).map((w) => w.message).join(" ");
+    expect(warned).toContain("Kitchen");
+    expect(warned).toContain("8.0 ft");
+  });
+
+  it("holds the stated size once the layout has room for it", async () => {
+    let doc = house();
+    for (const utterance of ["add a living room", "add a kitchen of 10 x 12 feet", "add a pantry below the kitchen"]) {
+      const outcome = await resolveTurn(doc, utterance, [], null);
+      if (outcome.kind !== "deterministic") throw new Error(`"${utterance}" -> ${outcome.kind}`);
+      doc = outcome.doc;
+    }
+    const kitchen = roomRect(doc, "Kitchen");
+    expect(kitchen.w).toBe(3048); // 10 ft
+    expect(kitchen.d).toBe(3658); // 12 ft
   });
 });

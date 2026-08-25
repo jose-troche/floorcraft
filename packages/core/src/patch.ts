@@ -24,15 +24,21 @@ import {
   type SlicingLeaf,
   type SlicingTree,
   type SolveViolation,
+  type Units,
   type WallGraph,
 } from "./types.js";
-import { solveSlicingTree, type LeafRect } from "./slicingSolver.js";
+import { solveSlicingTree, type LeafRect, type UnmetConstraint } from "./slicingSolver.js";
 import { buildWallGraph, type RoomMeta } from "./wallGraph.js";
 import { anchorForEdge, applyOpeningsToGraph } from "./openings.js";
 import { findLeafPath, getNodeAt, insertLeaf, removeLeaf, setSplitAt, swapLeaves, totalAreaWeight, updateLeaf } from "./treeOps.js";
 
 export type ApplyPatchResult =
-  | { ok: true; doc: PlanDocument; changes: string[] }
+  /**
+   * `warnings` carries the pinned dimensions the layout could not honour (SLV-7). The
+   * patch still applied — these are caveats about the result, not reasons to reject it —
+   * and the shape matches the dimension parser's warnings so a turn can merge the two.
+   */
+  | { ok: true; doc: PlanDocument; changes: string[]; warnings?: { message: string }[] }
   | { ok: false; errors: string[]; violations?: SolveViolation[] };
 
 /** Shown whenever a tree-shaped op (addRoom, resizeRoom, setSplit, dimension pins, ...) is
@@ -828,6 +834,97 @@ function applyDocumentScopedOps(doc: PlanDocument, ops: PatchOp[]): DocumentScop
   return { ok: true, doc: { ...doc, title, levels, activeLevelId }, changes, remainingOps };
 }
 
+const MM_PER_FOOT = 304.8;
+
+/**
+ * Prose length for a warning sentence. Deliberately not svgRenderer's `formatLength`:
+ * that renders drawing notation (`8'-0"`), which reads badly mid-sentence, and importing
+ * it here would close an import cycle since svgRenderer already reads `activeLevel` back
+ * out of this module.
+ */
+function lengthInWords(mm: number, units: Units): string {
+  return `${lengthNumber(mm, units)} ${units === "metric" ? "m" : "ft"}`;
+}
+
+function lengthNumber(mm: number, units: Units): string {
+  return units === "metric" ? (mm / 1000).toFixed(2) : (mm / MM_PER_FOOT).toFixed(1);
+}
+
+/** "30.0 x 40.0 ft" — a pair of measurements names its unit once, the way a person says it. */
+function lengthPair(widthMm: number, depthMm: number, units: Units): string {
+  return `${lengthNumber(widthMm, units)} x ${lengthInWords(depthMm, units)}`;
+}
+
+function joinPhrases(parts: string[]): string {
+  return parts.length <= 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+/**
+ * Turns the solver's unmet pins into one sentence per room (SLV-7): what the room actually
+ * came out as, and the reason it could not be what was asked for. Grouped by room because
+ * a room that missed on both axes missed for one reason, and saying it twice would read
+ * like two separate problems.
+ */
+function describeUnmetConstraints(
+  unmet: readonly UnmetConstraint[],
+  roomMeta: Record<RoomId, RoomMeta>,
+  leafCount: number,
+  units: Units,
+): { message: string }[] {
+  const byRoom = new Map<RoomId, UnmetConstraint[]>();
+  for (const item of unmet) {
+    const existing = byRoom.get(item.roomId);
+    if (existing) existing.push(item);
+    else byRoom.set(item.roomId, [item]);
+  }
+
+  return [...byRoom].map(([roomId, items]) => {
+    const meta = roomMeta[roomId];
+    const name = meta?.name ?? roomId;
+    const mins = meta ? ROOM_PROGRAM_MIN_DIMENSIONS[meta.program] : undefined;
+    const minFor = (axis: UnmetConstraint["axis"]) => (axis === "width" ? mins?.minWidth : mins?.minDepth);
+    const axisWord = (axis: UnmetConstraint["axis"]) => (axis === "width" ? "wide" : "deep");
+
+    // Both axes missed reads far better as one pair of measurements than as two clauses
+    // that each repeat "rather than the ... asked for".
+    const width = items.find((i) => i.axis === "width");
+    const depth = items.find((i) => i.axis === "depth");
+    const got =
+      width && depth
+        ? `${lengthPair(width.actualMm, depth.actualMm, units)}, not the ` +
+          `${lengthPair(width.requestedMm, depth.requestedMm, units)} asked for`
+        : joinPhrases(
+            items.map(
+              (i) =>
+                `${lengthInWords(i.actualMm, units)} ${axisWord(i.axis)}, not the ` +
+                `${lengthInWords(i.requestedMm, units)} asked for`,
+            ),
+          );
+
+    // A pin under the program minimum is refused for a reason worth naming, and naming it
+    // first matters: it is the one cause the user can act on without touching the layout.
+    const belowMin = items.filter((i) => {
+      const min = minFor(i.axis);
+      return min !== undefined && i.requestedMm < min;
+    });
+    let reason: string;
+    if (belowMin.length > 0) {
+      const needs = joinPhrases(belowMin.map((i) => `${lengthInWords(minFor(i.axis)!, units)} ${axisWord(i.axis)}`));
+      // The program is spelled for a reader, not as the enum ("primary-bedroom").
+      const kind = meta ? meta.program.replace(/-/g, " ") : "room";
+      reason = `a ${kind} needs at least ${needs} for clearances, so ask for a size at or above that`;
+    } else if (leafCount <= 1) {
+      reason = "the only room on a level has to fill it — add the other rooms and this size can hold";
+    } else {
+      reason =
+        "rooms tile the floor with no gaps, so a room can only pin the dimension its own wall line sets — " +
+        "size the rooms beside it, or drag its wall on the canvas";
+    }
+
+    return { message: `${name} came out ${got}: ${reason}.` };
+  });
+}
+
 export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
   const docOpsResult = applyDocumentScopedOps(doc, patch.ops);
   if (!docOpsResult.ok) return { ok: false, errors: docOpsResult.errors };
@@ -849,6 +946,7 @@ export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
 
   let graph: WallGraph;
   let afterLeaves: LeafRect[] = [];
+  let warnings: { message: string }[] = [];
 
   if (state.mode === "slicing") {
     if (!state.tree) {
@@ -857,6 +955,7 @@ export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
       const solved = solveSlicingTree(state.tree, state.boundary, docAfterDocOps.gridModule);
       if (!solved.ok) return { ok: false, errors: [], violations: solved.violations };
       afterLeaves = solved.leaves;
+      warnings = describeUnmetConstraints(solved.unmet, state.roomMeta, solved.leaves.length, state.units);
       const built = buildWallGraph(solved.leaves, state.boundary, state.roomMeta);
       if (!built.ok) return { ok: false, errors: [], violations: built.violations };
       graph = built.graph;
@@ -899,7 +998,12 @@ export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
     addedOpeningIds,
   });
 
-  return { ok: true, doc: newDoc, changes: [...docChanges, ...changes] };
+  return {
+    ok: true,
+    doc: newDoc,
+    changes: [...docChanges, ...changes],
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
 }
 
 function buildGenerator(state: LevelState): Generator | undefined {

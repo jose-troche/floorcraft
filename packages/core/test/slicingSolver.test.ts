@@ -91,3 +91,96 @@ describe("solveSlicingTree", () => {
     expect(totalArea).toBe(6000 * 5000);
   });
 });
+
+describe("solveSlicingTree — pinned dimensions (SLV-6, SLV-7)", () => {
+  const leaf = (roomId: string, extra: Partial<Extract<SlicingTree, { kind: "leaf" }>> = {}): SlicingTree => ({
+    kind: "leaf",
+    roomId,
+    areaWeight: 1,
+    minWidth: 500,
+    minDepth: 500,
+    ...extra,
+  });
+
+  it("honours a pin on the axis its parent split cuts", () => {
+    const tree: SlicingTree = {
+      kind: "split",
+      axis: "v",
+      ratio: 0.5,
+      children: [leaf("a", { exactWidth: 1500 }), leaf("b")],
+    };
+    const result = solveSlicingTree(tree, { widthMm: 6000, depthMm: 4000 }, 100);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.leaves.find((l) => l.roomId === "a")!.w).toBe(1500);
+    expect(result.unmet).toEqual([]);
+  });
+
+  /**
+   * The regression behind "add a kitchen of 8x5 feet": giving a pinned room a neighbour
+   * pushed it one level down the tree, and the outer cut — which used to see the leaf —
+   * saw a split instead and fell back to area weights, dropping the pin entirely.
+   */
+  it("keeps a pin visible to an outer cut after the room gains a neighbour", () => {
+    const tree: SlicingTree = {
+      kind: "split",
+      axis: "v",
+      ratio: 0.5,
+      children: [
+        leaf("other"),
+        { kind: "split", axis: "h", ratio: 0.5, children: [leaf("pinned", { exactWidth: 1500, exactDepth: 900 }), leaf("below")] },
+      ],
+    };
+    const result = solveSlicingTree(tree, { widthMm: 6000, depthMm: 4000 }, 100);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const pinned = result.leaves.find((l) => l.roomId === "pinned")!;
+    expect(pinned.w).toBe(1500);
+    expect(pinned.d).toBe(900);
+    expect(result.unmet).toEqual([]);
+  });
+
+  /**
+   * SLV-7: a pin the partition cannot deliver is reported, not silently dropped and not
+   * escalated to a failed solve. The lone room of a level has to fill that level — which
+   * is exactly how a 8x5 ft kitchen came to be drawn, and labelled, at 30x40 ft.
+   */
+  it("reports a pin the lone room of a level cannot hold", () => {
+    const result = solveSlicingTree(leaf("only", { exactWidth: 2438, exactDepth: 1524 }), { widthMm: 9144, depthMm: 12192 }, 100);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.leaves[0]!.w).toBe(9144);
+    expect(result.unmet).toEqual([
+      { roomId: "only", axis: "width", requestedMm: 2438, actualMm: 9144 },
+      { roomId: "only", axis: "depth", requestedMm: 1524, actualMm: 12192 },
+    ]);
+  });
+
+  it("reports a pin the room's own minimum overrides, without failing the solve", () => {
+    const tree: SlicingTree = {
+      kind: "split",
+      axis: "v",
+      ratio: 0.5,
+      children: [leaf("tight", { minWidth: 2440, exactWidth: 1524 }), leaf("b")],
+    };
+    const result = solveSlicingTree(tree, { widthMm: 6000, depthMm: 4000 }, 100);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.leaves.find((l) => l.roomId === "tight")!.w).toBe(2440);
+    expect(result.unmet).toEqual([{ roomId: "tight", axis: "width", requestedMm: 1524, actualMm: 2440 }]);
+  });
+
+  /** Unit conversion lands on whole mm (8 ft is 2438.4), so a pin may miss a round minimum by a hair. */
+  it("does not report a miss too small to see", () => {
+    const tree: SlicingTree = {
+      kind: "split",
+      axis: "v",
+      ratio: 0.5,
+      children: [leaf("a", { minWidth: 2440, exactWidth: 2438 }), leaf("b")],
+    };
+    const result = solveSlicingTree(tree, { widthMm: 6000, depthMm: 4000 }, 100);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.unmet).toEqual([]);
+  });
+});

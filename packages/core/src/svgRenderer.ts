@@ -34,8 +34,15 @@ export function formatLength(mm: number, units: Units): string {
     return `${(mm / 1000).toFixed(2)} m`;
   }
   const totalInches = mm / 25.4;
-  const feet = Math.floor(totalInches / 12);
-  const inches = Math.round(totalInches - feet * 12);
+  let feet = Math.floor(totalInches / 12);
+  let inches = Math.round(totalInches - feet * 12);
+  // Anything from 11.5" up rounds to a full 12", which is a foot and has to be carried:
+  // 6704mm is 21'-11.9", and printing it as the literal 21'-12" puts a dimension on the
+  // drawing that no one would write and that reads as 33 feet at a glance.
+  if (inches === 12) {
+    feet += 1;
+    inches = 0;
+  }
   return inches === 0 ? `${feet}'-0"` : `${feet}'-${inches}"`;
 }
 
