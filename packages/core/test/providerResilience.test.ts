@@ -65,7 +65,7 @@ describe("provider resilience", () => {
     expect(Object.values(outcome.doc.levels[0]!.graph.rooms)[0]!.name).toBe("Foyer");
   });
 
-  it("retries once on an invalid patch, then succeeds (INF-4)", async () => {
+  it("retries on an invalid patch, then succeeds (INF-4)", async () => {
     const provider = providerReturning([
       { ops: [{ op: "addRoom", program: "not-a-real-program" }] },
       { ops: [{ op: "addRoom", program: "kitchen" }] },
@@ -73,6 +73,52 @@ describe("provider resilience", () => {
     const outcome = await resolveTurn(plan(), "make this feel more open", [], provider);
     expect(outcome.kind).toBe("provider");
     expect(provider.calls).toBe(2);
+  });
+
+  it("gives a badly-formatted model a second repair attempt before giving up", async () => {
+    // The on-device model misses the format often enough that one retry was letting
+    // ordinary requests die; its failures are usually formatting, which a correction
+    // note does fix. Three calls total, and no more — a model that has ignored the
+    // schema twice is not about to start honouring it.
+    const provider = providerReturning([
+      "not json",
+      { ops: [{ op: "addRoom", program: "still-not-real" }] },
+      { ops: [{ op: "addRoom", program: "kitchen" }] },
+    ]);
+    const outcome = await resolveTurn(plan(), "make this feel more open", [], provider);
+    expect(outcome.kind).toBe("provider");
+    expect(provider.calls).toBe(3);
+  });
+
+  it("explains an unreadable answer in the user's terms, keeping the parse error for logs", async () => {
+    const provider = providerReturning(["I'm sorry, I can't help with that."]);
+    const outcome = await resolveTurn(plan(), "make this feel more open", [], provider);
+    expect(outcome.kind).toBe("error");
+    if (outcome.kind !== "error") return;
+    // What the user reads names something they can actually type next...
+    expect(outcome.message).toMatch(/try something like/i);
+    expect(outcome.message).not.toContain("JSON");
+    // ...while the failure itself is still available to whoever has to debug it.
+    expect(outcome.detail).toContain("JSON");
+  });
+
+  it("accepts the shapes a model reaches for when it nearly follows the schema", () => {
+    // Each of these is one small model's idea of "an ops array". Rejecting them costs a
+    // repair round trip (or the turn) over a rename this can do for free.
+    const op = { op: "addRoom", program: "kitchen" };
+    for (const raw of [{ ops: [op] }, { operations: [op] }, { patch: { ops: [op] } }, op]) {
+      const result = validatePatchResponse(raw, CORE_PATCH_OPS);
+      expect(result.ok, JSON.stringify(raw)).toBe(true);
+      if (!result.ok) continue;
+      expect(result.patch.ops).toHaveLength(1);
+    }
+  });
+
+  it("still refuses an op outside the tier's vocabulary, however it was wrapped", () => {
+    // Tolerating a wrapper must never tolerate its contents: setSplit emits geometry and
+    // is not in CORE_PATCH_OPS, so it stays rejected whichever key it arrived under.
+    const result = validatePatchResponse({ patch: { ops: [{ op: "setSplit", nodePath: [0] }] } }, CORE_PATCH_OPS);
+    expect(result.ok).toBe(false);
   });
 
   it("reports a transport failure as an error outcome without throwing, and without retrying", async () => {
@@ -83,12 +129,6 @@ describe("provider resilience", () => {
     expect(outcome.message).toContain("unavailable");
     // Re-prompting a model that was never reached cannot help, so no second call.
     expect(provider.calls).toBe(1);
-  });
-
-  it("surfaces an unusable response as an error rather than an exception", async () => {
-    const provider = providerReturning(["I'm sorry, I can't help with that."]);
-    const outcome = await resolveTurn(plan(), "make this feel more open", [], provider);
-    expect(outcome.kind).toBe("error");
   });
 
   it("recovers JSON from a fenced code block", () => {

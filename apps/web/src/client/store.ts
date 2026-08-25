@@ -277,6 +277,10 @@ export class PlanStore {
       return redone ? { kind: "applied", changes: ["Redone"] } : { kind: "noop" };
     }
     if (outcome.kind === "error") {
+      // The transcript gets the plain-language message; the underlying parse or validation
+      // failure goes to the console, where it is useful to whoever is debugging and out of
+      // the way of someone who just wants their bedrooms.
+      if (outcome.detail) console.warn("Turn failed:", outcome.detail);
       this.addChatTurn({ role: "assistant", text: outcome.message });
       await this.persist();
       this.emit();

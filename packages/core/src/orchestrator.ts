@@ -13,6 +13,7 @@ import { applyPatch } from "./patch.js";
 import { matchDeterministicIntent } from "./intentMatcher.js";
 import { buildPlanSummary } from "./planSummary.js";
 import { checkConstraintsPossible, parseDimensions, type DimensionWarning } from "./dimensionParser.js";
+import { unrecognizedRequestMessage } from "./examples.js";
 import type { PlanDocument, Turn } from "./types.js";
 import type { PlanProvider } from "./providers/types.js";
 import { CORE_PATCH_OPS, FREEFORM_PATCH_OPS, FULL_PATCH_OPS, validatePatchResponse } from "./providers/schema.js";
@@ -27,7 +28,15 @@ export type TurnOutcome =
    * room. The plan is untouched and the user is asked exactly one question (FR-5).
    */
   | { kind: "clarify"; question: string; options?: string[]; doc?: PlanDocument; changes?: string[] }
-  | { kind: "error"; message: string };
+  /**
+   * `message` is written for the person who typed the utterance; `detail` carries the
+   * underlying parse or validation failure for logs. They are separate because the two
+   * audiences want opposite things — "response is not a JSON object" told the user
+   * nothing they could act on, and dropping it entirely would leave nothing to debug with.
+   */
+  | { kind: "error"; message: string; detail?: string };
+
+const MAX_REPAIR_ATTEMPTS = 2;
 
 function describeApplyFailure(result: { ok: false; errors: string[]; violations?: { message: string }[] }): string {
   if (result.violations && result.violations.length > 0) return result.violations.map((v) => v.message).join(" ");
@@ -136,18 +145,27 @@ export async function resolveTurn(
   let result = await attempt();
   // INF-4's automatic repair retry applies to an *invalid patch* — a model that answered
   // badly. A transport failure gets no correction note (there is nothing to correct) and
-  // no second call, so a hard outage fails fast instead of hanging for two round trips.
-  if (!result.ok && result.failure === "validation") {
+  // no further calls, so a hard outage fails fast instead of hanging for extra round trips.
+  //
+  // Two repair attempts rather than one: the small on-device model (Tier 0) fails the
+  // first parse often enough that a single retry was leaving ordinary requests dead, and
+  // its failures are usually formatting — the kind a correction note actually fixes. The
+  // ceiling stays low because a model that has ignored the schema twice is not about to
+  // start honouring it, and every attempt is time the user spends watching a spinner.
+  for (let repair = 0; repair < MAX_REPAIR_ATTEMPTS && !result.ok && result.failure === "validation"; repair++) {
     result = await attempt(
       `Your previous response was invalid: ${result.error}. Reply again with corrected JSON only, following the schema exactly.`,
     );
   }
   if (!result.ok) {
-    const message =
-      result.failure === "transport"
-        ? `The assistant is unavailable right now (${result.error}). Your plan is unchanged — you can keep editing manually, or switch tiers in the header.`
-        : `The assistant could not produce a valid plan change (${result.error}). The plan is unchanged.`;
-    return { kind: "error", message };
+    if (result.failure === "transport") {
+      return {
+        kind: "error",
+        message: `The assistant is unavailable right now (${result.error}). Your plan is unchanged — you can keep editing manually, or switch tiers in the header.`,
+        detail: result.error,
+      };
+    }
+    return { kind: "error", message: unrecognizedRequestMessage(), detail: result.error };
   }
 
   return {

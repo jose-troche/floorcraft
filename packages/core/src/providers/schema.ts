@@ -234,15 +234,42 @@ function validateOp(raw: unknown, allowed: ReadonlySet<string>): PatchOp | strin
   }
 }
 
+/**
+ * Finds the ops array in a response that is *nearly* the agreed shape. Small models
+ * reliably produce a handful of near misses — a bare op object, a bare array, the object
+ * nested under `patch`, the key spelled `operations` — and rejecting those costs a repair
+ * round trip (or the whole turn) over a rename we can do here for free. This only ever
+ * relaxes where the ops live; every op inside is still validated exactly as before, so a
+ * tolerated wrapper cannot smuggle in an op the tier isn't allowed to use.
+ */
+function findOpsArray(raw: unknown): unknown[] | null {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  // A single op returned on its own rather than wrapped in a one-element list.
+  if (typeof r.op === "string") return [r];
+  for (const key of ["ops", "operations", "patch", "result"]) {
+    const value = r[key];
+    if (Array.isArray(value)) return value;
+    // `patch` and `result` usually hold the whole object, not the array — one level down.
+    if (value && typeof value === "object") {
+      const nested = findOpsArray(value);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
 export function validatePatchResponse(raw: unknown, allowedOps: readonly string[]): ValidateResult {
   if (typeof raw !== "object" || raw === null) return { ok: false, error: "response is not a JSON object" };
+  const ops_ = findOpsArray(raw);
+  if (!ops_) return { ok: false, error: "response missing 'ops' array" };
+  if (ops_.length === 0) return { ok: false, error: "response 'ops' array is empty" };
   const r = raw as Record<string, unknown>;
-  if (!Array.isArray(r.ops)) return { ok: false, error: "response missing 'ops' array" };
-  if (r.ops.length === 0) return { ok: false, error: "response 'ops' array is empty" };
 
   const allowed = new Set(allowedOps);
   const ops: PatchOp[] = [];
-  for (const entry of r.ops) {
+  for (const entry of ops_) {
     const result = validateOp(entry, allowed);
     if (typeof result === "string") return { ok: false, error: result };
     ops.push(result);
@@ -252,13 +279,21 @@ export function validatePatchResponse(raw: unknown, allowedOps: readonly string[
   return { ok: true, patch: { ops, narration, source: "provider" } };
 }
 
-/** JSON Schema (subset) for structured/constrained decoding — T0-4. */
+/**
+ * JSON Schema (subset) for structured/constrained decoding — T0-4.
+ *
+ * The `op` discriminator is written as a single-value `enum` rather than `const`: both say
+ * the same thing, but `enum` is the one every constrained-decoding backend we go through
+ * (Chrome's Prompt API, OpenRouter, the hosted vendors) actually compiles. A backend that
+ * chokes on the schema falls back to unconstrained generation, which is where the
+ * prose-wrapped answers that fail validation come from.
+ */
 export function buildPatchJsonSchema(allowedOps: readonly string[]): Record<string, unknown> {
   const opSchemas: Record<string, unknown> = {
     addRoom: {
       type: "object",
       properties: {
-        op: { const: "addRoom" },
+        op: { type: "string", enum: ["addRoom"] },
         program: { type: "string", enum: ROOM_PROGRAMS },
         name: { type: "string" },
         areaWeight: { type: "number" },
@@ -267,45 +302,45 @@ export function buildPatchJsonSchema(allowedOps: readonly string[]): Record<stri
       },
       required: ["op", "program"],
     },
-    removeRoom: { type: "object", properties: { op: { const: "removeRoom" }, roomId: { type: "string" } }, required: ["op", "roomId"] },
+    removeRoom: { type: "object", properties: { op: { type: "string", enum: ["removeRoom"] }, roomId: { type: "string" } }, required: ["op", "roomId"] },
     renameRoom: {
       type: "object",
-      properties: { op: { const: "renameRoom" }, roomId: { type: "string" }, name: { type: "string" } },
+      properties: { op: { type: "string", enum: ["renameRoom"] }, roomId: { type: "string" }, name: { type: "string" } },
       required: ["op", "roomId", "name"],
     },
     resizeRoom: {
       type: "object",
-      properties: { op: { const: "resizeRoom" }, roomId: { type: "string" }, areaWeight: { type: "number" }, targetAreaMm2: { type: "number" } },
+      properties: { op: { type: "string", enum: ["resizeRoom"] }, roomId: { type: "string" }, areaWeight: { type: "number" }, targetAreaMm2: { type: "number" } },
       required: ["op", "roomId"],
     },
     swapRooms: {
       type: "object",
-      properties: { op: { const: "swapRooms" }, roomIdA: { type: "string" }, roomIdB: { type: "string" } },
+      properties: { op: { type: "string", enum: ["swapRooms"] }, roomIdA: { type: "string" }, roomIdB: { type: "string" } },
       required: ["op", "roomIdA", "roomIdB"],
     },
     setBoundary: {
       type: "object",
-      properties: { op: { const: "setBoundary" }, widthMm: { type: "number" }, depthMm: { type: "number" } },
+      properties: { op: { type: "string", enum: ["setBoundary"] }, widthMm: { type: "number" }, depthMm: { type: "number" } },
       required: ["op", "widthMm", "depthMm"],
     },
     setUnits: {
       type: "object",
-      properties: { op: { const: "setUnits" }, units: { type: "string", enum: ["imperial", "metric"] } },
+      properties: { op: { type: "string", enum: ["setUnits"] }, units: { type: "string", enum: ["imperial", "metric"] } },
       required: ["op", "units"],
     },
     addLevel: {
       type: "object",
-      properties: { op: { const: "addLevel" }, name: { type: "string" }, copyFromLevelId: { type: "string" } },
+      properties: { op: { type: "string", enum: ["addLevel"] }, name: { type: "string" }, copyFromLevelId: { type: "string" } },
       required: ["op"],
     },
     setActiveLevel: {
       type: "object",
-      properties: { op: { const: "setActiveLevel" }, levelId: { type: "string" } },
+      properties: { op: { type: "string", enum: ["setActiveLevel"] }, levelId: { type: "string" } },
       required: ["op", "levelId"],
     },
     renameLevel: {
       type: "object",
-      properties: { op: { const: "renameLevel" }, levelId: { type: "string" }, name: { type: "string" } },
+      properties: { op: { type: "string", enum: ["renameLevel"] }, levelId: { type: "string" }, name: { type: "string" } },
       required: ["op", "levelId", "name"],
     },
   };
