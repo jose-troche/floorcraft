@@ -9,8 +9,15 @@ async function main(): Promise<void> {
   const root = document.getElementById("app");
   if (!root) throw new Error("missing #app root element");
 
-  const store = await PlanStore.load();
   const providers = new ProviderManager();
+  // Kicked off before anything else on the page. Spinning up the on-device model takes
+  // seconds and needs nothing from IndexedDB, the network, or the DOM — so it runs
+  // alongside all of that rather than after it. Behind a share link this was the whole
+  // difference between a warm first turn and a cold one: the warm-up used to sit behind
+  // a plan fetch it had no reason to wait for. Deliberately not awaited.
+  void providers.warmTier0();
+
+  const store = await PlanStore.load();
 
   const ui = new AppUI(root, store, providers);
   ui.render();
@@ -19,6 +26,10 @@ async function main(): Promise<void> {
   // now goes live partway through init(), and the store has to see that the moment it
   // happens or the first turn would still be routed to "no provider".
   providers.subscribe(() => store.setProvider(providers.getActiveProvider()));
+  // Tier 0 now starts probing before the store exists to subscribe, so its "available"
+  // may already have been published to nobody. Read the current state once here rather
+  // than waiting for the next change that happens to come along.
+  store.setProvider(providers.getActiveProvider());
 
   // A share link is opened before init finishes: someone following a link wants to see
   // the plan, and nothing about viewing it needs an inference tier (FR-14, RTE-4).

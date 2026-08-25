@@ -45,21 +45,31 @@ export class ProviderManager {
   private manuallySelected = false;
   /** /api/config as fetched during init; empty until then, and after a failed fetch. */
   private config: ConfigResponse = {};
+  /** In-flight or settled Tier 0 probe + warm-up, so it happens exactly once. */
+  private tier0Ready: Promise<void> | null = null;
 
   constructor() {
     this.tier2 = new Tier2Provider({ getApiKey: () => getOpenRouterKey() });
     this.rebuildTier3();
   }
 
+  /**
+   * Probes Tier 0 and starts its on-device session warming — once per session, however
+   * many times it is called. Split out of init() and safe to call the moment the page
+   * has script running: nothing about the on-device model needs the network, the plan,
+   * or the DOM, and every millisecond it waits is one the user spends watching their
+   * first message think. init() awaits this same promise rather than starting its own.
+   */
+  warmTier0(): Promise<void> {
+    // The catch lives here, not on the caller's await: that await only lands once the
+    // rest of init has finished its network work, long enough for a rejection to be
+    // reported as an unhandled promise in the meantime.
+    if (!this.tier0Ready) this.tier0Ready = this.initTier0().catch(() => {});
+    return this.tier0Ready;
+  }
+
   async init(): Promise<void> {
-    // Tier 0 is the whole reason a first turn can feel instant, and nothing about it
-    // needs the network — so probe and warm it *before* awaiting /api/config and the
-    // Turnstile script, not after. Sequencing it behind those meant the on-device
-    // session only started loading once a third-party script had finished downloading,
-    // which is exactly the cold start warmup() exists to hide. The catch is attached now
-    // rather than at the await below, which only lands once the network work is done —
-    // long enough for a rejection to be reported as unhandled in the meantime.
-    const tier0Ready = this.initTier0().catch(() => {});
+    const tier0Ready = this.warmTier0();
 
     let config: ConfigResponse = {};
     try {
@@ -91,10 +101,27 @@ export class ProviderManager {
   /** Probes Tier 0 and starts its session warm-up, publishing the result as soon as it lands. */
   private async initTier0(): Promise<void> {
     this.tier0Availability = await this.tier0.availability();
-    if (this.tier0Availability === "available") this.tier0.warmup();
+    if (this.tier0Availability === "available") {
+      this.tier0.warmup();
+      this.watchForReclaimedSession();
+    }
     // Select immediately rather than waiting on Tier 1: when Tier 0 is there it wins
     // outright (RTE-1), so chat can go live while the rest of init is still in flight.
     this.applyAutoSelection();
+  }
+
+  /**
+   * Re-warms the on-device session when the tab comes back to the foreground. A browser
+   * that has reclaimed an idle session leaves the app holding a handle that only fails
+   * when it is next used — which is why chat that answered instantly before a tab switch
+   * can crawl after one. Warming here moves that cost off the user's next message; it is
+   * a no-op when the session is still alive, so it costs nothing in the common case.
+   */
+  private watchForReclaimedSession(): void {
+    if (typeof document === "undefined") return;
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") this.tier0.warmup();
+    });
   }
 
   /** Rebuilds the Tier 3 provider from whichever vendor's key is currently on file. */
