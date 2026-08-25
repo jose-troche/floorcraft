@@ -13,6 +13,34 @@ function apply(doc: ReturnType<typeof basePlan>, ops: Patch["ops"]) {
 }
 
 describe("applyPatch", () => {
+  it("renamePlan retitles the document and reports the change", () => {
+    const doc = basePlan();
+    const { doc: renamed, changes } = apply(doc, [{ op: "renamePlan", title: "Oak Street" }]);
+    expect(renamed.title).toBe("Oak Street");
+    expect(changes).toContain("Renamed the plan to Oak Street");
+  });
+
+  it("renamePlan trims, rejects a blank title, and leaves the rest of the patch alone", () => {
+    const doc = basePlan();
+    const { doc: withRoom } = apply(doc, [
+      { op: "renamePlan", title: "  Oak Street  " },
+      { op: "addRoom", roomId: "kitchen", program: "kitchen", areaWeight: 1 },
+    ]);
+    expect(withRoom.title).toBe("Oak Street");
+    expect(Object.keys(activeLevel(withRoom).graph.rooms)).toEqual(["kitchen"]);
+
+    const blank = applyPatch(withRoom, { ops: [{ op: "renamePlan", title: "   " }], source: "user" });
+    expect(blank.ok).toBe(false);
+    if (!blank.ok) expect(blank.errors[0]).toContain("cannot be empty");
+  });
+
+  it("renamePlan caps a runaway title at a length the Worker will store", () => {
+    const doc = basePlan();
+    const { doc: renamed } = apply(doc, [{ op: "renamePlan", title: "x".repeat(500) }]);
+    expect(renamed.title).toHaveLength(200);
+  });
+
+
   it("addRoom builds a one-leaf tree and a matching wall graph", () => {
     const doc = basePlan();
     const { doc: doc1 } = apply(doc, [{ op: "addRoom", roomId: "kitchen", program: "kitchen", areaWeight: 1 }]);

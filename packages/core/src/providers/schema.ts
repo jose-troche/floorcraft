@@ -60,10 +60,13 @@ export const FREEFORM_PATCH_OPS = [
  * and the first design decision of the whole system is that the language model never emits
  * geometry (§1.2) — a model asked for a label position or an opening offset has no way to
  * know what is right. removeLevel/setLevelProps are precise/destructive-enough operations
- * that they stay a manual action too. They are listed here so the vocabulary stays
- * enumerable in one place (INF-7).
+ * that they stay a manual action too, and renamePlan names the document itself — the
+ * deterministic layer maps an explicit "rename the plan to X" onto it, but a model
+ * narrating a layout change has no business renaming the user's plan as a side effect.
+ * They are listed here so the vocabulary stays enumerable in one place (INF-7).
  */
 export const USER_ONLY_PATCH_OPS = [
+  "renamePlan",
   "moveOpening",
   "setOpeningSwing",
   "setLabelAnchor",

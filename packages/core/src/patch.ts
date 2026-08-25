@@ -641,7 +641,11 @@ function summarizeChanges(
   return changes;
 }
 
-const LEVEL_MANAGEMENT_OPS = new Set<PatchOp["op"]>([
+/** Matches the cap the Worker applies to the x-fc-title header it stores (plans.ts). */
+const MAX_PLAN_TITLE_LENGTH = 200;
+
+const DOCUMENT_SCOPED_OPS = new Set<PatchOp["op"]>([
+  "renamePlan",
   "addLevel",
   "removeLevel",
   "setActiveLevel",
@@ -660,32 +664,48 @@ function nextLevelSeq(existingIds: Iterable<LevelId>): number {
   return max + 1;
 }
 
-type LevelManagementResult =
+type DocumentScopedResult =
   | { ok: true; doc: PlanDocument; changes: string[]; remainingOps: PatchOp[] }
   | { ok: false; errors: string[] };
 
 /**
- * Multi-storey ops (Phase 3) are document-scoped, not level-scoped, so they run in their
- * own pass before the rest of the patch: `activeLevelId` may change mid-patch (addLevel
- * switches to the level it just created), and everything after this pass — the tree/cell
- * ops, the solve, the graph rebuild — operates on whichever level is active once these
- * have run. This is what makes "add a second floor with two bedrooms" one patch instead
- * of two turns.
+ * A plan rename and the multi-storey ops (Phase 3) are document-scoped, not level-scoped,
+ * so they run in their own pass before the rest of the patch: `activeLevelId` may change
+ * mid-patch (addLevel switches to the level it just created), and everything after this
+ * pass — the tree/cell ops, the solve, the graph rebuild — operates on whichever level is
+ * active once these have run. This is what makes "add a second floor with two bedrooms"
+ * one patch instead of two turns.
  */
-function applyLevelManagementOps(doc: PlanDocument, ops: PatchOp[]): LevelManagementResult {
+function applyDocumentScopedOps(doc: PlanDocument, ops: PatchOp[]): DocumentScopedResult {
   let levels = doc.levels;
   let activeLevelId = doc.activeLevelId;
+  let title = doc.title;
   const errors: string[] = [];
   const changes: string[] = [];
   const remainingOps: PatchOp[] = [];
   let levelSeq = nextLevelSeq(levels.map((l) => l.id));
 
   for (const op of ops) {
-    if (!LEVEL_MANAGEMENT_OPS.has(op.op)) {
+    if (!DOCUMENT_SCOPED_OPS.has(op.op)) {
       remainingOps.push(op);
       continue;
     }
     switch (op.op) {
+      case "renamePlan": {
+        // Trimmed and capped here rather than at the call site: this op is reachable from
+        // the toolbar, from chat, and from an imported patch, and a title of pure spaces
+        // would leave every export named after nothing.
+        const next = op.title.trim().slice(0, MAX_PLAN_TITLE_LENGTH).trim();
+        if (!next) {
+          errors.push("renamePlan: a plan title cannot be empty");
+          break;
+        }
+        if (next !== title) {
+          title = next;
+          changes.push(`Renamed the plan to ${next}`);
+        }
+        break;
+      }
       case "addLevel": {
         const levelId = op.levelId && !levels.some((l) => l.id === op.levelId) ? op.levelId : `level-${levelSeq++}`;
         const copyFrom = op.copyFromLevelId ? levels.find((l) => l.id === op.copyFromLevelId) : undefined;
@@ -805,25 +825,25 @@ function applyLevelManagementOps(doc: PlanDocument, ops: PatchOp[]): LevelManage
   }
 
   if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, doc: { ...doc, levels, activeLevelId }, changes, remainingOps };
+  return { ok: true, doc: { ...doc, title, levels, activeLevelId }, changes, remainingOps };
 }
 
 export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
-  const levelOpsResult = applyLevelManagementOps(doc, patch.ops);
-  if (!levelOpsResult.ok) return { ok: false, errors: levelOpsResult.errors };
-  const { doc: docAfterLevelOps, changes: levelChanges, remainingOps } = levelOpsResult;
+  const docOpsResult = applyDocumentScopedOps(doc, patch.ops);
+  if (!docOpsResult.ok) return { ok: false, errors: docOpsResult.errors };
+  const { doc: docAfterDocOps, changes: docChanges, remainingOps } = docOpsResult;
 
-  const levelIndex = docAfterLevelOps.levels.findIndex((l) => l.id === docAfterLevelOps.activeLevelId);
-  if (levelIndex < 0) return { ok: false, errors: [`active level ${docAfterLevelOps.activeLevelId} not found`] };
-  const level = docAfterLevelOps.levels[levelIndex]!;
+  const levelIndex = docAfterDocOps.levels.findIndex((l) => l.id === docAfterDocOps.activeLevelId);
+  if (levelIndex < 0) return { ok: false, errors: [`active level ${docAfterDocOps.activeLevelId} not found`] };
+  const level = docAfterDocOps.levels[levelIndex]!;
 
   const beforeLeaves =
-    level.generator?.kind === "slicing" ? solveSlicingTree(level.generator.tree, level.boundary, docAfterLevelOps.gridModule) : null;
+    level.generator?.kind === "slicing" ? solveSlicingTree(level.generator.tree, level.boundary, docAfterDocOps.gridModule) : null;
   const beforeAreas = beforeLeaves && beforeLeaves.ok ? leafAreas(beforeLeaves.leaves) : {};
   const namesBefore: Record<RoomId, string> = {};
   for (const [id, r] of Object.entries(level.graph.rooms)) namesBefore[id] = r.name;
 
-  const state = levelStateFromDoc(docAfterLevelOps, level);
+  const state = levelStateFromDoc(docAfterDocOps, level);
   const { errors, addedRoomIds, addedOpeningIds } = applyTreeOps(state, remainingOps, beforeAreas);
   if (errors.length > 0) return { ok: false, errors };
 
@@ -834,7 +854,7 @@ export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
     if (!state.tree) {
       graph = emptyWallGraph();
     } else {
-      const solved = solveSlicingTree(state.tree, state.boundary, docAfterLevelOps.gridModule);
+      const solved = solveSlicingTree(state.tree, state.boundary, docAfterDocOps.gridModule);
       if (!solved.ok) return { ok: false, errors: [], violations: solved.violations };
       afterLeaves = solved.leaves;
       const built = buildWallGraph(solved.leaves, state.boundary, state.roomMeta);
@@ -861,11 +881,11 @@ export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
     graph,
   };
 
-  const newLevels = [...docAfterLevelOps.levels];
+  const newLevels = [...docAfterDocOps.levels];
   newLevels[levelIndex] = newLevel;
 
   const newDoc: PlanDocument = {
-    ...docAfterLevelOps,
+    ...docAfterDocOps,
     units: state.units,
     levels: newLevels,
     updatedAt: new Date().toISOString(),
@@ -879,7 +899,7 @@ export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {
     addedOpeningIds,
   });
 
-  return { ok: true, doc: newDoc, changes: [...levelChanges, ...changes] };
+  return { ok: true, doc: newDoc, changes: [...docChanges, ...changes] };
 }
 
 function buildGenerator(state: LevelState): Generator | undefined {

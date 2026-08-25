@@ -401,6 +401,34 @@ fieldset input, fieldset select {
   flex-wrap: wrap;
 }
 
+/* Reads as the plan's name rather than as a form field until it is being edited. */
+.plan-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  min-width: 8rem;
+  max-width: 16rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+}
+
+.plan-title:hover:not(:disabled) {
+  border-color: var(--border);
+}
+
+.plan-title:focus {
+  border-color: var(--border);
+  background: var(--bg);
+  outline: none;
+}
+
+.plan-title:disabled {
+  opacity: 0.7;
+}
+
 .canvas-container {
   flex: 1;
   overflow: auto;

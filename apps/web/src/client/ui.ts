@@ -51,6 +51,8 @@ export class AppUI {
   private pendingLabel: string | null = null;
   private paperSize: PaperSize = "Letter";
   private shareLinks: { readOnly: string; edit: string } | null = null;
+  /** An in-progress plan rename, carried across the renders that rebuild the toolbar. */
+  private titleDraft: { value: string; caret: number } | null = null;
   /** Options from the last clarifying question, offered as one-tap answers (FR-5). */
   private clarifyOptions: string[] | null = null;
   /** Whether the inline "connect your own key" form (Tier 3) is expanded. */
@@ -113,6 +115,14 @@ export class AppUI {
     main.appendChild(this.renderLeftPanel(providerState));
     main.appendChild(this.renderRightPanel(level, doc.units));
     this.root.appendChild(main);
+
+    // render() rebuilds the whole tree, and a provider probe or a chat turn can land while
+    // the user is part-way through typing a plan name. Put them back where they were.
+    if (this.titleDraft) {
+      const input = this.root.querySelector<HTMLInputElement>("input.plan-title");
+      input?.focus();
+      input?.setSelectionRange(this.titleDraft.caret, this.titleDraft.caret);
+    }
   }
 
   /** RTE-3: the hosted free pool being exhausted (per-client quota or the global daily
@@ -983,6 +993,8 @@ export class AppUI {
     toolbar.className = "canvas-toolbar";
     const title = this.store.doc.title || "plan";
 
+    toolbar.appendChild(this.renderPlanTitleInput());
+
     const addButton = (label: string, onClick: () => void, className?: string) => {
       const btn = document.createElement("button");
       btn.textContent = label;
@@ -992,31 +1004,35 @@ export class AppUI {
       return btn;
     };
 
-    addButton("SVG", () => downloadBlob(renderSvg(this.store.doc), `${title}.svg`, "image/svg+xml"));
+    addButton("SVG", () => this.runExport(title, EXPORT_KINDS.svg, () => renderSvg(this.store.doc)));
     // FR-19: DXF is the way into DWG-native tools; .dwg itself is never offered. DXF, PDF,
     // IFC and glTF are all dynamically imported (NFR-2): none of them is needed for first
     // paint, and IFC/glTF in particular are Phase 3 additions with real code weight.
     const dxf = addButton("DXF", () =>
-      void import("@floorcraft/core/dxfExport").then(({ exportDxf }) =>
-        downloadBlob(exportDxf(this.store.doc), `${title}.dxf`, "application/dxf"),
-      ),
+      this.runExport(title, EXPORT_KINDS.dxf, async () => {
+        const { exportDxf } = await import("@floorcraft/core/dxfExport");
+        return exportDxf(this.store.doc);
+      }),
     );
     dxf.title = "DXF R12 — imports into LibreCAD, QCAD, AutoCAD and SketchUp (and is the route into DWG tools)";
     addButton("PDF", () =>
-      void import("@floorcraft/core/pdfExport").then(({ exportPdf }) =>
-        downloadBlob(exportPdf(this.store.doc, { paperSize: this.paperSize }), `${title}.pdf`, "application/pdf"),
-      ),
+      this.runExport(title, EXPORT_KINDS.pdf, async () => {
+        const { exportPdf } = await import("@floorcraft/core/pdfExport");
+        return exportPdf(this.store.doc, { paperSize: this.paperSize });
+      }),
     );
     const ifc = addButton("IFC", () =>
-      void import("@floorcraft/core/ifcExport").then(({ exportIfc }) =>
-        downloadBlob(exportIfc(this.store.doc), `${title}.ifc`, "application/x-step"),
-      ),
+      this.runExport(title, EXPORT_KINDS.ifc, async () => {
+        const { exportIfc } = await import("@floorcraft/core/ifcExport");
+        return exportIfc(this.store.doc);
+      }),
     );
     ifc.title = "IFC4 SPF — verify in your BIM tool before relying on it; see the README's manual smoke-test note";
     addButton("glTF", () =>
-      void import("@floorcraft/core/gltfExport").then(({ exportGltf }) =>
-        downloadBlob(exportGltf(this.store.doc), `${title}.glb`, "model/gltf-binary"),
-      ),
+      this.runExport(title, EXPORT_KINDS.glb, async () => {
+        const { exportGltf } = await import("@floorcraft/core/gltfExport");
+        return exportGltf(this.store.doc);
+      }),
     );
 
     const paper = document.createElement("select");
@@ -1033,7 +1049,7 @@ export class AppUI {
     };
     toolbar.appendChild(paper);
 
-    addButton("JSON", () => downloadBlob(exportJson(this.store.doc), `${title}.json`, "application/json"));
+    addButton("JSON", () => this.runExport(title, EXPORT_KINDS.json, () => exportJson(this.store.doc)));
 
     // Detached/freeform editing (DM-2, FR-11): a level either follows the generated
     // layout or has been detached into a direct rectangle-union, never both.
@@ -1087,6 +1103,62 @@ export class AppUI {
     }
 
     return toolbar;
+  }
+
+  /**
+   * The plan's name, editable in place. It is what every export is named after and what the
+   * PDF title block prints, so it is worth having somewhere obvious rather than behind a
+   * dialog — and it goes through renamePlan like any other op, which makes it undoable and
+   * syncs it to the cloud copy's title.
+   */
+  private renderPlanTitleInput(): HTMLInputElement {
+    const input = document.createElement("input");
+    input.className = "plan-title";
+    input.value = this.titleDraft?.value ?? this.store.doc.title;
+    input.setAttribute("aria-label", "Plan name");
+    input.title = "Names this plan — exports are suggested under this name";
+    input.disabled = this.store.readOnly;
+
+    input.oninput = () => {
+      this.titleDraft = { value: input.value, caret: input.selectionStart ?? input.value.length };
+    };
+
+    // Committed on Enter or on leaving the field, never per keystroke: one rename should be
+    // one undo step and one cloud save, not one of each per letter.
+    const commit = () => {
+      // A re-render detaches this input, and the blur that follows is not the user leaving
+      // the field — committing there would fire mid-typing.
+      if (!input.isConnected) return;
+      const next = input.value.trim();
+      this.titleDraft = null;
+      if (!next || next === this.store.doc.title) {
+        input.value = this.store.doc.title; // An empty name is a slip, not a request.
+        return;
+      }
+      void this.runManual([{ op: "renamePlan", title: next }]);
+    };
+
+    input.onblur = commit;
+    input.onkeydown = (e) => {
+      if (e.key === "Enter") input.blur();
+      else if (e.key === "Escape") {
+        this.titleDraft = null;
+        input.value = this.store.doc.title;
+        input.blur();
+      }
+    };
+    return input;
+  }
+
+  /**
+   * Every export goes through here so that a failed one is reported in the UI rather than
+   * left as an unhandled rejection in the console.
+   */
+  private runExport(baseName: string, kind: ExportKind, produce: () => Promise<ExportBytes> | ExportBytes): void {
+    void saveExport(baseName, kind, produce).catch((e) => {
+      this.error = `Could not save the ${kind.extension.toUpperCase()}: ${(e as Error).message}`;
+      this.render();
+    });
   }
 
   private async createShareLinks(): Promise<void> {
@@ -1168,8 +1240,90 @@ function findWeight(tree: import("@floorcraft/core").SlicingTree, roomId: string
   return findWeight(tree.children[0], roomId) ?? findWeight(tree.children[1], roomId);
 }
 
-/** FR-16: every export is a client-side Blob — no server round-trip, works offline. */
-function downloadBlob(content: string | Uint8Array, filename: string, type: string): void {
+type ExportBytes = string | Uint8Array;
+type ExportKind = { extension: string; mime: string; description: string };
+
+const EXPORT_KINDS = {
+  svg: { extension: "svg", mime: "image/svg+xml", description: "SVG drawing" },
+  dxf: { extension: "dxf", mime: "application/dxf", description: "DXF drawing" },
+  pdf: { extension: "pdf", mime: "application/pdf", description: "PDF document" },
+  ifc: { extension: "ifc", mime: "application/x-step", description: "IFC model" },
+  glb: { extension: "glb", mime: "model/gltf-binary", description: "glTF binary model" },
+  json: { extension: "json", mime: "application/json", description: "Floorcraft plan" },
+} as const satisfies Record<string, ExportKind>;
+
+/** Not in lib.dom; the handle and writable stream it returns are. */
+type SaveFilePicker = (options: {
+  suggestedName?: string;
+  types?: Array<{ description: string; accept: Record<string, string[]> }>;
+}) => Promise<FileSystemFileHandle>;
+
+/**
+ * FR-16 is unchanged — the bytes are still produced client-side, offline, with no server
+ * round-trip. What this adds is a say in where they land: the plan's title only ever
+ * suggests a filename now, and the user names the file before anything is written.
+ *
+ * `produce` is deliberately called *after* the dialog rather than before. showSaveFilePicker
+ * needs the click's transient activation, and a dynamic import plus a full PDF render is
+ * long enough to spend it.
+ */
+async function saveExport(
+  baseName: string,
+  kind: ExportKind,
+  produce: () => Promise<ExportBytes> | ExportBytes,
+): Promise<void> {
+  const suggestedName = `${sanitizeFileName(baseName)}.${kind.extension}`;
+  const picker = (window as unknown as { showSaveFilePicker?: SaveFilePicker }).showSaveFilePicker;
+
+  if (picker) {
+    let handle: FileSystemFileHandle;
+    try {
+      handle = await picker({
+        suggestedName,
+        types: [{ description: kind.description, accept: { [kind.mime]: [`.${kind.extension}`] } }],
+      });
+    } catch (e) {
+      // A closed dialog is a cancelled save, not a failure worth reporting.
+      if ((e as DOMException).name === "AbortError") return;
+      // A picker the environment refuses (a sandboxed frame, an enterprise policy) must not
+      // cost the user their export; fall back to the download the app always did.
+      downloadBlob(await produce(), suggestedName, kind.mime);
+      return;
+    }
+    // Produced before the file is opened for writing: an export that throws here leaves
+    // the file it would have overwritten untouched.
+    const content = await produce();
+    const writable = await handle.createWritable();
+    await writable.write(new Blob([content as BlobPart], { type: kind.mime }));
+    await writable.close();
+    return;
+  }
+
+  // Firefox and Safari have no save picker, and a browser left to itself will either
+  // invent a name or silently reuse the suggested one. Ask instead.
+  const chosen = window.prompt("Save exported file as", suggestedName);
+  if (chosen === null) return;
+  const name = sanitizeFileName(chosen.replace(/\.[^./\\]*$/, "")) || sanitizeFileName(baseName);
+  downloadBlob(await produce(), `${name}.${kind.extension}`, kind.mime);
+}
+
+/**
+ * Keeps a plan title usable as a filename: the separators and reserved characters that
+ * Windows and macOS reject, the leading/trailing dots and spaces they quietly strip, and
+ * a length that will not trip a filesystem's own limit.
+ */
+function sanitizeFileName(name: string): string {
+  const cleaned = name
+    .replace(/[/\\:*?"<>|\u0000-\u001f]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[.\s]+|[.\s]+$/g, "")
+    .slice(0, 100)
+    .trim();
+  return cleaned || "plan";
+}
+
+/** The fallback path for browsers without a save picker; the name is already chosen. */
+function downloadBlob(content: ExportBytes, filename: string, type: string): void {
   const blob = new Blob([content as BlobPart], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");

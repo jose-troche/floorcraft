@@ -113,7 +113,7 @@ export class PlanSync {
       let ref = this.options.getRef();
       if (!ref) {
         const created = await fetch("/api/plans", { method: "POST", headers, body, keepalive: options.keepalive });
-        if (!created.ok) throw new Error(await describe(created));
+        if (!created.ok) throw new SyncFailure(await describe(created));
         ref = (await created.json()) as CloudRef;
         await this.options.saveRef(ref);
       } else {
@@ -123,7 +123,7 @@ export class PlanSync {
           body,
           keepalive: options.keepalive,
         });
-        if (!saved.ok) throw new Error(await describe(saved));
+        if (!saved.ok) throw new SyncFailure(await describe(saved));
       }
 
       const patches = this.queuedPatches;
@@ -141,7 +141,8 @@ export class PlanSync {
 
       this.setStatus({ state: "saved", at: Date.now() });
     } catch (e) {
-      this.setStatus({ state: "error", message: (e as Error).message });
+      const message = e instanceof SyncFailure ? e.message : "the server could not be reached";
+      this.setStatus({ state: "error", message });
     }
   }
 
@@ -149,7 +150,12 @@ export class PlanSync {
   async shareLinks(): Promise<{ readOnly: string; edit: string }> {
     await this.flush();
     const ref = this.options.getRef();
-    if (!ref) throw new Error("This plan has not been saved to the cloud yet.");
+    if (!ref) {
+      // The flush above already worked out why there is nothing to link to. Falling back
+      // to "not saved yet" here would report a failed save as a deliberate one.
+      if (this.status.state === "error") throw new Error(this.status.message);
+      throw new Error("This plan has not been saved to the cloud yet.");
+    }
     const base = `${location.origin}${location.pathname}`;
     return {
       readOnly: `${base}?plan=${ref.id}&t=${ref.shareToken}`,
@@ -158,14 +164,25 @@ export class PlanSync {
   }
 }
 
+/** Carries a message already phrased for a user; see doFlush's catch. */
+class SyncFailure extends Error {}
+
+/**
+ * The Worker writes its own errors for a person to read ("Too many requests"), so those
+ * pass through. Everything else is described by status class — "500 Internal Server
+ * Error" tells the user nothing they can act on.
+ */
 async function describe(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as { error?: string };
     if (body.error) return body.error;
   } catch {
-    // Fall through to the status line.
+    // Fall through to the phrase for this status class.
   }
-  return `${response.status} ${response.statusText}`;
+  if (response.status === 429) return "too many saves in a row — wait a moment and try again";
+  if (response.status === 413) return "this plan is too large to save to the cloud";
+  if (response.status >= 500) return "the server could not save this plan";
+  return "the server would not accept this plan";
 }
 
 export type OpenedShare = { doc: PlanDocument; access: "read" | "edit"; id: string; token: string };

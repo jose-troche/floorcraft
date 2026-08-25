@@ -16,6 +16,24 @@ function planWithRooms(): PlanDocument {
 }
 
 describe("matchDeterministicIntent", () => {
+  it("renames the plan itself, without going looking for a room called 'plan'", () => {
+    const doc = planWithRooms();
+    for (const utterance of ["rename the plan to Oak Street", "call this plan Oak Street", "rename the project as Oak Street"]) {
+      expect(matchDeterministicIntent(doc, utterance)).toMatchObject({
+        kind: "patch",
+        patch: { ops: [{ op: "renamePlan", title: "Oak Street" }] },
+      });
+    }
+  });
+
+  it("still routes a room rename to renameRoom", () => {
+    expect(matchDeterministicIntent(planWithRooms(), "rename the kitchen to Galley")).toMatchObject({
+      kind: "patch",
+      patch: { ops: [{ op: "renameRoom", roomId: "kitchen", name: "Galley" }] },
+    });
+  });
+
+
   it("matches undo/redo", () => {
     expect(matchDeterministicIntent(planWithRooms(), "undo")).toEqual({ kind: "undo" });
     expect(matchDeterministicIntent(planWithRooms(), "redo")).toEqual({ kind: "redo" });

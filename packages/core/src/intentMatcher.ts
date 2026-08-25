@@ -516,6 +516,11 @@ export function matchDeterministicIntent(doc: PlanDocument, utteranceRaw: string
 
   let m: RegExpMatchArray | null;
 
+  // "rename the plan to Oak Street" / "call this plan Oak Street" — ahead of both renames
+  // below, which would otherwise go looking for a room or level called "plan".
+  m = utterance.match(/(?:rename|call)\s+(?:the\s+|this\s+)?(?:plan|project|drawing|file)\s+(?:to\s+|as\s+)?(.+)/i);
+  if (m) return patch([{ op: "renamePlan", title: m[1]!.trim() }]);
+
   // "rename level 2 to Attic" / "rename the second floor to Attic" — checked ahead of the
   // generic room rename below, or "level 2" would be looked up as a room name and fail.
   m = utterance.match(/rename\s+(?:the\s+)?(?:level|floor|storey|story)\s+(.+?)\s+(?:to|as)\s+(.+)/i);

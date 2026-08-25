@@ -112,6 +112,12 @@ test("serves a strict CSP on API responses, that still permits the Blob-download
   const configResponse = await page.request.get("/api/config");
   const csp = configResponse.headers()["content-security-policy"];
   expect(csp).toBeTruthy();
+  // The Blob download is only the fallback path now, for browsers with no save picker.
+  // Chromium has one, so take it away to reach the path this CSP claim is about — and it
+  // has to go before the navigation, since that is when the app reads it.
+  await page.addInitScript(() => {
+    delete (window as unknown as { showSaveFilePicker?: unknown }).showSaveFilePicker;
+  });
   await page.goto("/");
   expect(csp).toContain("default-src 'self'");
   expect(csp).toContain("object-src 'none'");
@@ -124,8 +130,77 @@ test("serves a strict CSP on API responses, that still permits the Blob-download
   const addRoomButton = page.getByRole("button", { name: "Add room", exact: true });
   await addRoomButton.click();
 
+  // Without a picker the app prompts for the name itself, and honours what it is told.
+  page.on("dialog", (dialog) => void dialog.accept("kitchen remodel"));
   const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "JSON" }).click()]);
-  expect(download.suggestedFilename()).toMatch(/\.json$/);
+  expect(download.suggestedFilename()).toBe("kitchen remodel.json");
+});
+
+/**
+ * A real showSaveFilePicker opens a native dialog Playwright cannot drive, so stand in for
+ * it and record what the app asked for and what it wrote. Must run before the navigation.
+ */
+async function stubSavePicker(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const saved: { name?: string; text?: string } = {};
+    (window as unknown as { __saved: typeof saved }).__saved = saved;
+    (window as unknown as { showSaveFilePicker: unknown }).showSaveFilePicker = async (options: {
+      suggestedName?: string;
+    }) => {
+      saved.name = options.suggestedName;
+      return {
+        createWritable: async () => ({
+          write: async (blob: Blob) => {
+            saved.text = await blob.text();
+          },
+          close: async () => {},
+        }),
+      };
+    };
+  });
+}
+
+function readSaved(page: Page) {
+  return page.evaluate(() => (window as unknown as { __saved: { name?: string; text?: string } }).__saved);
+}
+
+test("the save dialog is offered the plan's name, and the export is written to it (FR-16)", async ({ page }) => {
+  await stubSavePicker(page);
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Manual editor" }).click();
+  await page.getByRole("button", { name: "Add room", exact: true }).click();
+  await page.getByRole("button", { name: "JSON" }).click();
+
+  await expect.poll(async () => (await readSaved(page)).name).toBe("Untitled Plan.json");
+  const written = (await readSaved(page)).text;
+  expect(JSON.parse(written ?? "{}")).toMatchObject({ title: "Untitled Plan" });
+});
+
+test("renaming the plan in the toolbar renames the export, and is undoable (renamePlan)", async ({ page }) => {
+  await stubSavePicker(page);
+  await page.goto("/");
+
+  const title = page.locator("input.plan-title");
+  await expect(title).toHaveValue("Untitled Plan");
+  await title.fill("Oak Street");
+  await title.press("Enter");
+
+  await page.getByRole("button", { name: "JSON" }).click();
+  await expect.poll(async () => (await readSaved(page)).name).toBe("Oak Street.json");
+
+  // renamePlan goes through the same patch pipeline as everything else, so the undo
+  // button covers it — that is the point of it being an op rather than a stray setter.
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(title).toHaveValue("Untitled Plan");
+});
+
+test("an emptied plan name is treated as a slip, not a rename", async ({ page }) => {
+  await page.goto("/");
+  const title = page.locator("input.plan-title");
+  await title.fill("   ");
+  await title.press("Enter");
+  await expect(title).toHaveValue("Untitled Plan");
 });
 
 test("raster import entry point opens and closes cleanly, with no console errors (FR-20..FR-25)", async ({ page }) => {

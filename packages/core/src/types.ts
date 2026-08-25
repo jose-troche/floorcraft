@@ -296,8 +296,11 @@ export type PatchOp =
   | { op: "setDimension"; roomId: RoomId; dimensionType: DimensionType; value: number; unit?: "ft" | "m" }
   | { op: "clearDimension"; roomId: RoomId; dimensionType: DimensionType }
   | { op: "setDimensionRange"; roomId: RoomId; dimensionType: DimensionType; minMm?: number; maxMm?: number }
-  // Multi-storey (Phase 3). Document-scoped: applied before the rest of the patch, against
-  // whichever level is active once they've run — see applyPatch in patch.ts.
+  // Document-scoped ops: applied before the rest of the patch, against whichever level is
+  // active once they've run — see applyPatch in patch.ts. renamePlan names the plan itself,
+  // which is what an export's filename and the PDF title block are drawn from.
+  | { op: "renamePlan"; title: string }
+  // Multi-storey (Phase 3).
   | { op: "addLevel"; levelId?: LevelId; name?: string; copyFromLevelId?: LevelId }
   | { op: "removeLevel"; levelId: LevelId }
   | { op: "setActiveLevel"; levelId: LevelId }
