@@ -38,6 +38,7 @@ const PROGRAM_SYNONYMS: Record<string, RoomProgram> = {
   bathroom: "bath",
   bath: "bath",
   "half bath": "half-bath",
+  "half bathroom": "half-bath",
   "powder room": "half-bath",
   laundry: "laundry",
   "laundry room": "laundry",
@@ -195,15 +196,45 @@ function requireRoom(doc: PlanDocument, text: string): RequiredRoom {
 
 // ------------------------------------------------------------------ programs
 
+type ProgramMention = { program: RoomProgram; start: number; end: number };
+
+// Longest synonym first, so "half bath" beats "bath" and "living room" beats "room".
+const PROGRAM_KEYS = Object.keys(PROGRAM_SYNONYMS).sort((a, b) => b.length - a.length);
+
+/**
+ * Finds every kind of room named in a normalized string, as non-overlapping mentions in
+ * the order they were said. Matching is on whole words and takes the longest synonym at
+ * each position, so "master bedroom" is one mention rather than a "bedroom" nested in a
+ * longer phrase, and a plural is part of the mention it belongs to.
+ *
+ * Callers are expected to look at how many came back, not just the first. Picking one
+ * mention out of several used to be how "three bedrooms ... with a private bathroom"
+ * became three bathrooms: "bathroom" is a longer synonym than "bedroom", so the longest
+ * key won a contest it should never have been entered in. Text naming two kinds of room
+ * is describing a relationship between them, which is a request for a provider.
+ */
+function findProgramMentions(needle: string): ProgramMention[] {
+  const mentions: ProgramMention[] = [];
+  for (const key of PROGRAM_KEYS) {
+    const pattern = new RegExp(`\\b${key.replace(/ /g, "\\s+")}s?\\b`, "g");
+    for (let m = pattern.exec(needle); m; m = pattern.exec(needle)) {
+      const start = m.index;
+      const end = start + m[0].length;
+      // A shorter synonym sitting inside one already taken ("room" within "living room")
+      // is the same mention seen again, not a second room.
+      if (mentions.some((other) => start < other.end && other.start < end)) continue;
+      mentions.push({ program: PROGRAM_SYNONYMS[key]!, start, end });
+    }
+  }
+  return mentions.sort((a, b) => a.start - b.start);
+}
+
+/** The one kind of room this text names, or null if it names none — or more than one. */
 function findProgram(text: string): RoomProgram | null {
   const needle = normalize(text);
   if (!needle) return null;
-  // Longest synonym match first, so "half bath" beats "bath" and "living room" beats "room".
-  const keys = Object.keys(PROGRAM_SYNONYMS).sort((a, b) => b.length - a.length);
-  for (const key of keys) {
-    if (needle === key || needle.includes(key)) return PROGRAM_SYNONYMS[key]!;
-  }
-  return null;
+  const mentions = findProgramMentions(needle);
+  return mentions.length === 1 ? mentions[0]!.program : null;
 }
 
 const SUGGESTED_PROGRAMS = ["kitchen", "living room", "bedroom", "bathroom", "office", "closet", "pantry", "hallway"];
@@ -278,14 +309,31 @@ function extractCount(text: string): { count: number; rest: string } {
   return { count: 1, rest: text };
 }
 
+/**
+ * Words a segment may carry around its room without changing what is being asked for.
+ * Anything outside this set — "with a private bathroom", "facing the garden" — is a
+ * description this matcher cannot express, and disqualifies the segment.
+ */
+const SEGMENT_FILLER = /\b(?:a|an|the|another|more|extra|additional|new|other|also|too|as\s+well)\b/g;
+
 /** Reads one segment of a list — "a living room", "three bedrooms" — or fails. */
 function parseRoomRequest(segment: string): RoomRequest | null {
   const normalized = normalize(segment);
   if (!normalized || VAGUE_QUANTIFIER.test(normalized)) return null;
   const { count, rest } = extractCount(normalized.replace(/^(?:another|the)\s+/, ""));
   if (!Number.isInteger(count) || count < 1) return null;
-  const program = findProgram(rest);
-  return program ? { program, count } : null;
+
+  const mentions = findProgramMentions(rest);
+  if (mentions.length !== 1) return null;
+  const mention = mentions[0]!;
+
+  // The segment has to be spent entirely on the count and the room. A segment that says
+  // more than that — "one with a private bathroom" — is stating a relationship, and
+  // expanding it into bare rooms would drop the very thing that was asked for.
+  const leftover = `${rest.slice(0, mention.start)} ${rest.slice(mention.end)}`.replace(SEGMENT_FILLER, " ").trim();
+  if (leftover) return null;
+
+  return { program: mention.program, count };
 }
 
 /**
@@ -416,7 +464,12 @@ function matchAddRoom(doc: PlanDocument, utterance: string): IntentResult {
   if (!rest) return null; // "add 3x4" with no noun at all — let the provider read it.
   if (LIST_OR_COUNT.test(rest)) return null; // several rooms or a count: provider territory.
 
-  const program = findProgram(rest);
+  const mentions = findProgramMentions(normalize(rest));
+  // Two kinds of room in one un-listed request ("a bedroom with an ensuite bathroom")
+  // relate them to each other. Only a provider can express that, and picking one of the
+  // two would deliver a room the user did not ask for.
+  if (mentions.length > 1) return null;
+  const program = mentions[0]?.program;
   if (!program) return unknownProgram(rest);
 
   return patch([

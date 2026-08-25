@@ -321,8 +321,37 @@ describe("asking instead of guessing", () => {
       "add a few bedrooms", // no defensible count
       "add 200 bedrooms", // past the per-turn ceiling
       "add a kitchen 8x5 ft and a bath", // one size, two rooms — no honest way to split it
+      // Segments that describe the rooms rather than just naming them. "One with a
+      // private bathroom" is a relationship between two rooms, and this one used to be
+      // read as four bathrooms and no bedrooms at all: the segment was scanned for any
+      // known room word, and "bathroom" is a longer synonym than "bedroom".
+      "add three bedrooms. One with a private bathroom, the other two with a shared bathroom",
+      "add two bedrooms and a shared bathroom",
     ]) {
       expect(matchDeterministicIntent(plan(), utterance), utterance).toBeNull();
+    }
+  });
+
+  it("never collapses two kinds of room into whichever synonym is longer", () => {
+    // Both of these name a bedroom first. Answering with a bathroom — the room the user
+    // did not ask for — is a worse failure than declining to read the request at all.
+    for (const utterance of ["add a bedroom with an ensuite bathroom", "add a bedroom with a closet"]) {
+      expect(matchDeterministicIntent(plan(), utterance), utterance).toBeNull();
+    }
+    // The plain phrasings around them still resolve deterministically, including the
+    // multi-word synonyms that word-bounded matching has to keep whole.
+    for (const [utterance, program] of [
+      ["add a bedroom", "bedroom"],
+      ["add a master bedroom", "primary-bedroom"],
+      ["add a half bathroom", "half-bath"],
+      ["add a walk in closet", "closet"],
+      ["add a big bedroom", "bedroom"],
+    ] as const) {
+      const result = matchDeterministicIntent(plan(), utterance);
+      expect(result?.kind, utterance).toBe("patch");
+      if (result?.kind !== "patch") continue;
+      expect(result.patch.ops, utterance).toHaveLength(1);
+      expect(result.patch.ops[0], utterance).toMatchObject({ op: "addRoom", program });
     }
   });
 

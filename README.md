@@ -273,10 +273,16 @@ These questions are deliberately *not* forwarded to a provider — a model asked
 Multi-room requests are expanded here rather than forwarded — but only when every
 part reads exactly. `add a kitchen, a living room and two bedrooms` becomes four
 `addRoom` ops; `add a few bedrooms` (no defensible count), `add a kitchen and
-paint the walls blue` (a fragment that is not a room), and `add a kitchen 8x5 ft
-and a bath` (one size, two rooms) all go to a provider instead. Adding two of
-the three rooms someone asked for is the same wrong-inference failure as adding
-the wrong one.
+paint the walls blue` (a fragment that is not a room), `add a kitchen 8x5 ft
+and a bath` (one size, two rooms), and `add three bedrooms, one with a private
+bathroom` (a segment describing a relationship, not just naming a room) all go
+to a provider instead. Adding two of the three rooms someone asked for is the
+same wrong-inference failure as adding the wrong one.
+
+Room words are matched on whole words, and text naming two kinds of room is
+never reduced to one of them. `add a bedroom with an ensuite bathroom` states a
+relationship only a provider can express, so it goes there rather than becoming
+whichever room happened to match.
 
 ### DXF golden fixture (FR-17)
 
