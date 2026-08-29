@@ -158,3 +158,42 @@ describe("applyPatch", () => {
     expect(changes.some((c) => c.includes("Kitchen") && c.includes("%"))).toBe(true);
   });
 });
+
+describe("setDimension units", () => {
+  // INF-6 lets an op state its own unit. Ignoring it turned "a 12 ft kitchen" into a
+  // 12 mm one, which the solver then silently grew back to the program minimum — the pin
+  // looked applied and the room was the wrong size.
+  function twoRoomPlan() {
+    return apply(basePlan(), [
+      { op: "addRoom", roomId: "kitchen", program: "kitchen", areaWeight: 1 },
+      { op: "addRoom", roomId: "living", program: "living", areaWeight: 1 },
+    ]).doc;
+  }
+
+  function pinnedWidth(op: Patch["ops"][number]): number | undefined {
+    return apply(twoRoomPlan(), [op]).doc.levels[0]!.graph.rooms.kitchen!.constraints?.width?.exact;
+  }
+
+  it("reads a value in feet as millimetres", () => {
+    expect(pinnedWidth({ op: "setDimension", roomId: "kitchen", dimensionType: "width", value: 12, unit: "ft" })).toBe(3658);
+  });
+
+  it("reads a value in metres as millimetres", () => {
+    expect(pinnedWidth({ op: "setDimension", roomId: "kitchen", dimensionType: "width", value: 3.5, unit: "m" })).toBe(3500);
+  });
+
+  it("treats a bare value as millimetres", () => {
+    expect(pinnedWidth({ op: "setDimension", roomId: "kitchen", dimensionType: "width", value: 3000 })).toBe(3000);
+  });
+
+  it("squares the factor for an area", () => {
+    const { doc } = apply(twoRoomPlan(), [{ op: "setDimension", roomId: "kitchen", dimensionType: "area", value: 200, unit: "ft" }]);
+    // 200 sq ft = 200 x 304.8² mm².
+    expect(doc.levels[0]!.graph.rooms.kitchen!.constraints?.area?.exact).toBe(18_580_608);
+  });
+
+  it("says what it pinned, in the units it actually stored", () => {
+    const { changes } = apply(twoRoomPlan(), [{ op: "setDimension", roomId: "kitchen", dimensionType: "width", value: 12, unit: "ft" }]);
+    expect(changes).toContain("Kitchen width pinned to 3658mm");
+  });
+});

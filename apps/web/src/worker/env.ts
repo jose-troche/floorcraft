@@ -15,4 +15,6 @@ export interface Env {
   QUOTA_SALT?: string;
   TIER1_MODEL?: string;
   CLOUD_SYNC_ENABLED?: string;
+  /** "false" turns the optional MCP module (specs.md §10) off; anything else leaves it on. */
+  MCP_ENABLED?: string;
 }

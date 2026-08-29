@@ -11,6 +11,7 @@ import { readClientId, setClientIdCookie } from "./cookies";
 import { errorResponse } from "./redact";
 import { handlePlans } from "./plans";
 import { withSecurityHeaders } from "./security";
+import { handleMcp } from "./mcp/server";
 
 // Workers AI retires models on a published schedule, and a retired id fails the whole
 // request (the previous default was deprecated out from under this Worker mid-flight).
@@ -156,6 +157,12 @@ async function route(request: Request, env: Env): Promise<Response> {
     const headers = new Headers(response.headers);
     setClientIdCookie(headers, clientId);
     return new Response(response.body, { status: response.status, headers });
+  }
+  // §10 — the optional MCP module. Everything above this line is the thin pipe ARC-1
+  // describes; /mcp is the one path that deliberately parses and solves plan documents
+  // inside the Worker, against the budget MCP-3 sets.
+  if (url.pathname === "/mcp") {
+    return handleMcp(request, env, getIp(request));
   }
   if (url.pathname.startsWith("/api/")) {
     return errorResponse("Not found", 404);

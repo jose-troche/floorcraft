@@ -4,8 +4,10 @@
 // the openings are resolved onto the fresh edges.
 
 import {
+  MM_PER_UNIT,
   ROOM_PROGRAM_MIN_DIMENSIONS,
   emptyWallGraph,
+  type DimensionType,
   type DoorSwing,
   type Generator,
   type Level,
@@ -424,12 +426,13 @@ function applyTreeOps(
         break;
       }
       case "setDimension": {
+        const value = dimensionValueInMm(op.dimensionType, op.value, op.unit);
         const err = applyDimensionOp(state, op.roomId, (leaf, meta) => {
           const constraints = { ...(meta.constraints ?? {}) };
           if (op.dimensionType === "width" || op.dimensionType === "depth" || op.dimensionType === "area") {
-            constraints[op.dimensionType] = { ...(constraints[op.dimensionType] ?? {}), exact: op.value };
+            constraints[op.dimensionType] = { ...(constraints[op.dimensionType] ?? {}), exact: value };
           } else {
-            constraints.aspectRatio = { min: op.value, max: op.value };
+            constraints.aspectRatio = { min: value, max: value };
           }
           return { leaf: syncLeafConstraints(leaf, meta.program, constraints), meta: { ...meta, constraints } };
         });
@@ -599,7 +602,7 @@ function summarizeChanges(
         changes.push(`Units changed to ${op.units}`);
         break;
       case "setDimension":
-        changes.push(`${nameOf(op.roomId)} ${op.dimensionType} pinned to ${op.value}mm`);
+        changes.push(`${nameOf(op.roomId)} ${op.dimensionType} pinned to ${dimensionValueInMm(op.dimensionType, op.value, op.unit)}mm`);
         break;
       case "setDimensionRange":
         changes.push(`${nameOf(op.roomId)} ${op.dimensionType} constrained`);
@@ -923,6 +926,22 @@ function describeUnmetConstraints(
 
     return { message: `${name} came out ${got}: ${reason}.` };
   });
+}
+
+/**
+ * setDimension's value in millimetres. The op carries an optional `unit` (INF-6) because
+ * a model asked for "a 12 ft kitchen" has a number and a unit, not a millimetre count —
+ * and reading that 12 as 12 mm produces a room a hundredth of the size asked for, which
+ * the solver then quietly rounds up to the program minimum. Everything stored is
+ * millimetres (DM-4); this is the only place the op's unit is honoured.
+ *
+ * An area is a squared length, so it scales by the square of the factor: 200 sq ft is
+ * 200 x 304.8^2 mm². An aspect ratio is unitless and ignores the field entirely.
+ */
+function dimensionValueInMm(dimensionType: DimensionType, value: number, unit?: "ft" | "m"): number {
+  if (!unit || dimensionType === "aspectRatio") return value;
+  const scale = MM_PER_UNIT[unit];
+  return Math.round(dimensionType === "area" ? value * scale * scale : value * scale);
 }
 
 export function applyPatch(doc: PlanDocument, patch: Patch): ApplyPatchResult {

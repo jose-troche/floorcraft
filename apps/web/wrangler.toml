@@ -43,6 +43,11 @@ TIER1_ENABLED = "true"
 # Set to "false" to run without cloud plan storage: /api/plans stops answering and the
 # client keeps everything in IndexedDB, share links included (i.e. absent).
 CLOUD_SYNC_ENABLED = "true"
+# The optional MCP module (specs.md §10): POST /mcp, exposing the plan engine as tools an
+# external agent can call. It performs no inference and needs no binding of its own —
+# saved-plan tools use the same D1 database and the same capability tokens share links
+# carry. Set to "false" to serve the web app alone.
+MCP_ENABLED = "true"
 DAILY_QUOTA_PER_CLIENT = "12"
 GLOBAL_NEURON_BUDGET = "7000"
 # Leave TIER1_MODEL unset to track the Worker's own candidate list, which falls back

@@ -148,9 +148,7 @@ async function handleReplace(request: Request, env: Env, url: URL, id: string): 
   const doc = await request.text();
   if (doc.length === 0) return errorResponse("Empty plan document", 400);
 
-  await env.DB.prepare("UPDATE plans SET doc = ?, title = ?, schema_version = ?, updated_at = ? WHERE id = ?")
-    .bind(doc, readTitle(request), readSchemaVersion(request), Date.now(), id)
-    .run();
+  await writePlanDoc(env, id, doc, readTitle(request), readSchemaVersion(request));
   return jsonResponse({ ok: true, id });
 }
 
@@ -223,6 +221,33 @@ export async function handlePlans(request: Request, env: Env, url: URL, clientId
   if (request.method === "GET") return handleRead(request, env, url, id);
   if (request.method === "PUT") return handleReplace(request, env, url, id);
   return errorResponse("Method not allowed", 405);
+}
+
+/**
+ * Full replace of a stored document. Shared by `PUT /api/plans/:id` and the MCP module's
+ * write tools (§10.3) so there is one place that decides what a save does.
+ */
+export async function writePlanDoc(env: Env, id: string, doc: string, title: string, schemaVersion: number): Promise<void> {
+  await env.DB.prepare("UPDATE plans SET doc = ?, title = ?, schema_version = ?, updated_at = ? WHERE id = ?")
+    .bind(doc, title, schemaVersion, Date.now(), id)
+    .run();
+}
+
+export type OpenedPlan = { id: string; doc: string; title: string; schemaVersion: number; access: Access };
+
+/**
+ * Looks up a plan and resolves what the presented token may do with it. Exported for the
+ * MCP module, whose bearer token (MCP-7) is the same capability token a share link
+ * carries — MCP-2's "no forked implementations" applies to authorization just as much as
+ * to geometry, and a second copy of this pair is exactly how the two front doors would
+ * drift apart on who may write.
+ */
+export async function openPlan(env: Env, id: string, token: string | null): Promise<OpenedPlan | null> {
+  const row = await loadPlan(env, id);
+  if (!row) return null;
+  const access = await authorize(row, token);
+  if (!access) return null;
+  return { id: row.id, doc: row.doc, title: row.title, schemaVersion: row.schema_version, access };
 }
 
 export const PLAN_LIMITS = { MAX_DOC_BYTES, VERSION_RETENTION };

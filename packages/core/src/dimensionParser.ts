@@ -9,14 +9,14 @@
 
 import { activeLevel } from "./patch.js";
 import { solveSlicingTree } from "./slicingSolver.js";
-import { generatorTree, type DimensionType, type PatchOp, type PlanDocument, type RoomId, type Units } from "./types.js";
+import { MM_PER_UNIT, generatorTree, type DimensionType, type PatchOp, type PlanDocument, type RoomId, type Units } from "./types.js";
 
-const MM_PER_FOOT = 304.8;
-const MM_PER_INCH = 25.4;
-const MM_PER_METRE = 1000;
-const MM2_PER_SQ_FOOT = 92903.04;
+export type ParsedUnit = keyof typeof MM_PER_UNIT;
 
-export type ParsedUnit = "ft" | "m" | "in" | "cm" | "mm";
+const MM_PER_FOOT = MM_PER_UNIT.ft;
+const MM_PER_INCH = MM_PER_UNIT.in;
+const MM_PER_METRE = MM_PER_UNIT.m;
+const MM2_PER_SQ_FOOT = MM_PER_FOOT * MM_PER_FOOT;
 
 export type DimensionWarning = {
   /** The fragment the warning is about, quoted back so the UI can show what it read. */

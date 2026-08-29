@@ -9,6 +9,7 @@ export * from "./migrate.js";
 export * from "./stairs.js";
 export * from "./rasterImport.js";
 export * from "./planSummary.js";
+export * from "./validatePlan.js";
 export * from "./svgRenderer.js";
 export * from "./jsonExport.js";
 export * from "./dxfExport.js";

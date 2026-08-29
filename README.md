@@ -1,4 +1,4 @@
-# Floorcraft — Phases 1, 2, 3 and 4
+# Floorcraft — Phases 1, 2, 3, 4 and the MCP module
 
 Phase 1 ("Prove the loop") of `specs.md`: description → summary → patch →
 slicing tree → wall graph → SVG, with Tier 0 (on-device) and Tier 1 (hosted
@@ -20,6 +20,12 @@ calibration, and a reviewable per-wall accept/reject draft before anything is
 committed. The source image never leaves the browser — no upload, no bucket,
 no server-side config — so this needs nothing beyond the base deployment.
 
+The optional module of §10 adds an **MCP server** at `POST /mcp`: the same plan
+engine exposed as tools an external agent (Claude, or any MCP client) can call.
+It runs no inference of its own — the agent does the reasoning, the server does
+the geometry — so it costs nothing per turn beyond a Worker request. See
+"The MCP server" below for what it exposes and how to connect one.
+
 ## Layout
 
 ```
@@ -30,10 +36,15 @@ packages/core/   Pure TypeScript domain engine (no DOM, no network) — solver,
                  parsing, stair-alignment checking, raster-import geometry
                  (collinear merge, axis snap, planar face traversal,
                  rectangle decomposition), provider interface + Tier 0/1/2/3.
-                 Reusable outside the web UI (spec §10, MCP server, Phase ≥2).
+                 Reusable outside the web UI — the MCP server (§10) runs these
+                 exact modules inside the Worker, with no forked copies.
 apps/web/        Vite frontend (chat + manual editor + interactive canvas) and
                  the Cloudflare Worker (static assets, /api/config, /api/infer,
-                 /api/plans).
+                 /api/plans, /mcp).
+apps/web/src/worker/mcp/
+                 The optional MCP module (§10): Streamable HTTP transport, the
+                 seven-tool surface, and the patch vocabulary written out for
+                 an agent.
 ```
 
 ## Phase 2 at a glance
@@ -310,6 +321,171 @@ wall counts match the model) catch structural regressions the byte
 comparison alone would miss; neither substitutes for the manual viewer
 smoke-test — see "IFC and glTF export — verify before you trust them" above.
 
+## The MCP server (§10, optional module)
+
+`POST /mcp` exposes the plan engine as MCP tools. The division of labour is the
+whole point (MCP-1): **the server runs no model.** The agent turns "a two-bed
+cottage with the kitchen facing the street" into a structured room programme;
+the server turns that into geometry, validates it, and exports it. That is why
+this module costs nothing per turn — the user's own assistant subscription pays
+for the reasoning — and why it can't hallucinate a wall: it has no generative
+step to hallucinate in.
+
+Everything geometric comes from `@floorcraft/core` — the same solver, wall-graph
+builder, renderer, validator and exporters the browser runs (MCP-2). The Worker
+adds transport, auth, caps and wording, and nothing else.
+
+### Tool surface (§10.4)
+
+| Tool | Does |
+|---|---|
+| `create_plan` | Structured room programme → a solved plan. Fits a footprint to the rooms if you don't state one. |
+| `describe_plan` | The INF-2 digest: rooms with ids/programs/areas, adjacencies, levels, exterior wall ids, openings. |
+| `apply_patch` | Applies edit ops and re-solves. All-or-nothing. |
+| `validate_plan` | `{valid, violations[]}` — rooms under their program minimum, rooms no exterior door reaches, a level with no way in or out. |
+| `render_svg` | The drawing, as an MCP resource a host can display inline (MCP-12). |
+| `export_plan` | `json`, `svg`, `dxf` or `ifc`, inline. |
+| `list_programs` | Room programs with the clearances the solver enforces. |
+
+Every response carries a human-readable summary *and* the structured payload
+(MCP-11), so an agent can narrate a turn without a second call. `apply_patch`'s
+description writes out the entire patch vocabulary inline (MCP-10) — the agent
+has no other schema source, and `test/mcp/protocol.test.ts` fails if an op is
+ever added to the vocabulary without being documented there.
+
+### Two ways to hold plan state (MCP-6, MCP-7)
+
+The server keeps no session. Plan state either travels in the arguments or
+lives in D1 behind a token:
+
+- **Anonymous.** Call `create_plan` with no `planId`; the response carries a
+  `doc`, and you pass it to the next call. Nothing is stored. The document is
+  sent with its derived geometry stripped — wall nodes and edges are solver
+  *output*, regenerated on every patch, and about five sixths of the bytes — so
+  a six-room plan travels as ~1.7 KB rather than ~9 KB. It is the same schema,
+  not a second format: the server re-solves on arrival, and what gets persisted
+  is always the complete document.
+- **Saved.** Present a plan's capability token and pass `planId`. Edits are
+  written back, and every response carries the web-app URL that opens the same
+  plan in a browser (MCP-13). A share token reads; only the edit token writes.
+
+The token is the `t=` value in a link the app's Share button produces —
+`https://…/?plan=<id>&t=<token>` — and it can be sent either as
+`Authorization: Bearer <token>` or as `?t=<token>` on the endpoint URL itself.
+The second form exists because the hosts below take a connector *URL* and have
+no field for a custom header.
+
+### Connecting Claude to it
+
+**claude.ai (web), or the Claude desktop app** — Settings → Connectors → *Add
+custom connector* (availability depends on your Claude plan), and paste:
+
+```
+https://floorcraft.troche.workers.dev/mcp
+```
+
+That is the anonymous mode: full plan building, editing and export, nothing
+stored. To work on a *saved* plan instead, open it in the web app, press Share,
+copy the **Edit link** row (not the view-only one — that token cannot write),
+and paste the connector URL with that link's token on it:
+
+```
+https://floorcraft.troche.workers.dev/mcp?t=<edit token from the share link>
+```
+
+Then tell Claude the plan id (the `plan=` value from the same link) — or just
+"work on plan `<id>`" — and every edit it makes shows up in the browser tab.
+The token scopes to that one plan and nothing else.
+
+**Claude Code**, or any client configured by file:
+
+```bash
+claude mcp add --transport http floorcraft https://floorcraft.troche.workers.dev/mcp
+```
+
+For a client that still speaks stdio only, bridge it:
+
+```json
+{
+  "mcpServers": {
+    "floorcraft": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://floorcraft.troche.workers.dev/mcp"]
+    }
+  }
+}
+```
+
+Against a local `wrangler dev`, the same URLs with `http://localhost:8787/mcp`.
+
+A session then looks like: *"a 36 by 40 foot cottage with a kitchen, a living
+room, two bedrooms and a bath"* → `create_plan` → `describe_plan` for the room
+ids and the exterior wall to hang the front door on → `apply_patch` to add
+doors and pin the kitchen to 12 ft → `validate_plan` → `export_plan` as DXF.
+
+### The CPU budget (MCP-3, MCP-4) — measured, not asserted
+
+This is the one path where the Worker deliberately parses and solves plan
+documents rather than passing them through as opaque text (ARC-1's documented
+exception). MCP-3's three mitigations are all in place:
+
+- **40 rooms per level, rejected beyond** — on the way in and on the way out of
+  every write.
+- **A benchmark that fails the build.** `apps/web/test/mcp/budget.test.ts`
+  drives the real handler at the 40-room cap and fails if any tool's p99 passes
+  7 ms. It prints the whole table on every run, because MCP-4's decision —
+  reduce scope, or move to Workers Paid — needs the numbers.
+- **Patch application over regeneration.** Two places did redundant work and no
+  longer do. `create_plan` used to lay the rooms out against an oversized
+  boundary just to learn their minimum size, then solve again; the solver now
+  reports that minimum on the `boundary-too-small` violation itself, so the
+  first attempt fails before building any geometry and only one full solve
+  happens. And an inline document is no longer re-solved on arrival when the
+  patch about to be applied will re-solve it anyway.
+
+Measured on the reference machine at 40 rooms. The tail is sampled on the wall
+clock — the only clock with the resolution for a p99 over 2 ms calls — and
+scaled by the batch's CPU-to-wall ratio, since CPU is what Cloudflare actually
+meters and a busy runner should not fail a build. Mean CPU is asserted
+separately, because it cannot be inflated by contention at all:
+
+| Tool | p99 | mean CPU |
+|---|---|---|
+| `create_plan` (fitted footprint) | 3.9 ms | 2.8 ms |
+| `apply_patch` | 2.5 ms | 2.2 ms |
+| `apply_patch` (opening on a named edge — needs the prior graph rebuilt) | 3.6 ms | 3.0 ms |
+| `describe_plan` | 2.7 ms | 1.7 ms |
+| `render_svg` | 3.4 ms | 2.4 ms |
+| `export_plan` (IFC) | 4.6 ms | 3.6 ms |
+
+**One deliberate scope reduction, per MCP-4.** §10.4 lists `svg` among
+`create_plan`'s and `apply_patch`'s outputs. Attaching it costs both the render
+and the serialization of a 42 KB string, which at the 40-room cap put
+`create_plan`'s p99 within measurement noise of the ceiling (6.1–6.8 ms across
+runs). MCP-4 says to reduce scope rather than let the budget quietly slip and
+names moving `render_svg` off the shared path as the mitigation, so that is what
+happens: one tool draws, and it is one call away. It costs the agent's context
+less too, and open question 7 is unresolved — hosts differ on whether they
+render an inline resource at all.
+
+### Abuse controls
+
+`/mcp` is metered per token, and per IP for anonymous callers (MCP-8, 60
+calls/minute); request bodies are capped at 512 KB, well below SEC-2's 1 MB,
+because this endpoint parses what it receives; and every error leaving it goes
+through the shared redaction helper (SEC-5). A bad argument comes back as a
+tool result with `isError: true` and a sentence saying what to do differently,
+not as a JSON-RPC error — the caller is a model that can usually fix its own
+argument if told what was wrong. `MCP_ENABLED = "false"` in `wrangler.toml`
+serves the web app alone.
+
+### What it does *not* implement
+
+`GET /mcp` returns 405: there is no server-initiated stream and no session to
+resume, which is MCP-6 as a property of the transport rather than a promise.
+Batched requests are still answered for older clients. Nothing here calls
+`env.AI` — the test harness's fake throws if anything tries.
+
 ## Requirements traceability (Phase 1 exit criteria)
 
 | Exit criterion | Where |
@@ -318,11 +494,30 @@ smoke-test — see "IFC and glTF export — verify before you trust them" above.
 | Worker CPU p99 < 6ms | Worker only proxies/counts (no doc parsing, no solver) — see `apps/web/src/worker/index.ts` |
 | Inference disabled → template + editing still work | Manual editor tab (`apps/web/src/client/ui.ts`) uses the reducer directly, no provider involved |
 
+### MCP module (§10)
+
+| Requirement | Where |
+|---|---|
+| MCP-1 no inference | `apps/web/src/worker/mcp/` calls no provider; the test env's `AI.run` throws if anything tries |
+| MCP-2 shared modules, no forks | Tools call `@floorcraft/core` only; auth reuses `plans.ts`'s `openPlan`/`writePlanDoc` |
+| MCP-3 40-room cap, CI benchmark, patch over regeneration | `planIO.ts` (`assertWithinCaps`), `test/mcp/budget.test.ts`, `createPlan`'s single-solve fit + `patchNeedsPriorGraph` |
+| MCP-4 reduce scope, documented | The drawing moved to `render_svg` — see "The CPU budget" above |
+| MCP-5 Streamable HTTP at POST /mcp | `mcp/server.ts`, routed in `worker/index.ts` |
+| MCP-6 stateless | No session id is issued; state travels inline or by `planId` |
+| MCP-7 anonymous or bearer-scoped | `openPlanArg`; `test/mcp/tools.test.ts` "saved plans" |
+| MCP-8 rate limited per token | `rateLimitKey` over the shared `rateLimiter.ts` |
+| MCP-9 structured `create_plan` input | `rooms[]` programme; no prose field exists to pass |
+| MCP-10 vocabulary documented inline | `mcp/vocabulary.ts`, enforced by a `Record<OpName, string>` and a protocol test |
+| MCP-11 summary beside structured data | `reply()` — every tool result leads with prose |
+| MCP-12 SVG as a resource | `svgBlock()` |
+| MCP-13 openable in the web app, both ways | Persisted docs are complete documents; every saved response carries the share URL |
+
 ## Development
 
 ```bash
 npm install
-npm test              # core package unit tests + 20-prompt fixture (vitest)
+npm test               # core unit tests + 20-prompt fixture, and the Worker-side
+                       # MCP suite including its CPU-budget benchmark (vitest)
 npm run build          # typecheck + build the core package and the client bundle
 ```
 
@@ -432,6 +627,13 @@ exchange and every BYOK provider are called directly from the browser
 They're available the moment the app is deployed, gated only by the user
 choosing to connect one.
 
+**The MCP server needs no deployment configuration either.** It performs no
+inference, so it wants no AI binding, no Turnstile keys and no quota; it is
+live at `https://<your-worker>/mcp` as soon as the app is deployed. It uses D1
+only for the saved-plan mode, and falls back to telling a caller to pass a
+document inline when D1 isn't bound. Set `MCP_ENABLED = "false"` in
+`wrangler.toml` to serve the web app alone.
+
 ### What's intentionally *not* here yet
 
 - **WebLLM/WebGPU as an opt-in local provider (T0-6, a SHOULD)** — deferred
@@ -449,7 +651,13 @@ choosing to connect one.
 - **Real-world raster-import accuracy** — the deterministic geometry
   pipeline is fully unit-tested; the OpenCV.js stages have not been run
   against a real scanned or photographed floor plan in this environment.
-- The MCP server module (spec §10) — optional, any phase ≥ 2.
+- **R2-backed export downloads.** §10.4 offers `export_plan` a TTL-signed
+  download URL as an alternative to inline text; no R2 bucket is bound, so
+  exports come back inline. PDF and glTF are binary and stay in the web app
+  rather than arriving as base64 an agent pays for and cannot read.
+- **MCP `resources/list`.** Plans are not enumerable — each belongs to whoever
+  holds its token — so drawings and exports ride back as embedded resources on
+  the call that produced them (MCP-12) instead of as a browsable directory.
 
 Phase 2 documents add an optional `levels[].openings` array; Phase 3 changes
 `Level.generator` from `{tree, detached?}` to a `{kind: "slicing"|"freeform",

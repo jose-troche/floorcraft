@@ -240,6 +240,7 @@ export function solveSlicingTree(
         {
           roomIds,
           reason: "boundary-too-small",
+          requiredMm: { widthMm: rootMin.w, depthMm: rootMin.d },
           message:
             `The requested rooms need at least ${rootMin.w}mm x ${rootMin.d}mm, ` +
             `but the boundary is only ${boundary.widthMm}mm x ${boundary.depthMm}mm. ` +

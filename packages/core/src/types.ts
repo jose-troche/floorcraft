@@ -11,6 +11,13 @@ export const SCHEMA_VERSION = 1 as const;
 
 export type Units = "imperial" | "metric";
 
+/**
+ * DM-4: every length in a document is an integer millimetre count. These are the factors
+ * into it, kept here — beside the rule they serve — so both the dimension parser and the
+ * patch reducer convert with the same numbers.
+ */
+export const MM_PER_UNIT = { ft: 304.8, in: 25.4, cm: 10, mm: 1, m: 1000 } as const;
+
 export type RoomProgram =
   | "kitchen"
   | "living"
@@ -329,6 +336,13 @@ export type Patch = {
 
 export type SolveViolation = {
   roomIds: RoomId[];
+  /**
+   * For `boundary-too-small`, the smallest boundary that would hold these rooms. Present
+   * so a caller can fit a footprint to the rooms without solving twice to discover it —
+   * the alternative is laying the plan out against a deliberately oversized boundary just
+   * to read the minimum back off the resulting tree.
+   */
+  requiredMm?: { widthMm: number; depthMm: number };
   reason:
     | "min-dimension"
     | "unsatisfiable-ratio"
