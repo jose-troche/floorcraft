@@ -48,7 +48,7 @@ describe("POST /mcp", () => {
     for (const op of [
       "addRoom", "removeRoom", "renameRoom", "resizeRoom", "swapRooms", "moveRoom", "setSplit",
       "addOpening", "removeOpening", "setBoundary", "setUnits", "setDimension", "clearDimension",
-      "setDimensionRange", "addLevel", "setActiveLevel", "renameLevel",
+      "setDimensionRange", "addLevel", "setActiveLevel", "renameLevel", "nestRoom",
     ]) {
       expect(applyPatch.description).toContain(op);
     }

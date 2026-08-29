@@ -4,6 +4,7 @@ export * from "./wallGraph.js";
 export * from "./openings.js";
 export * from "./dragPlan.js";
 export * from "./treeOps.js";
+export * from "./nesting.js";
 export * from "./patch.js";
 export * from "./migrate.js";
 export * from "./stairs.js";

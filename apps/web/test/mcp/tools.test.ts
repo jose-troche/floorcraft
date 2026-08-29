@@ -42,6 +42,15 @@ describe("create_plan", () => {
     expect(data.planId).toBeUndefined();
   });
 
+  it("doesn't repeat the generator tree when `doc` already carries it", async () => {
+    // doc.levels[].generator.tree is the exact same tree buildPlanSummary reads for
+    // generatorTree — sending both would bill a growing conversation for the same bytes
+    // on every later turn, not just this one.
+    const data = dataOf(await call("create_plan", HOUSE));
+    expect(data.summary).not.toHaveProperty("generatorTree");
+    expect(data.doc.levels[0].generator.tree).toBeDefined();
+  });
+
   it("leaves the drawing to render_svg (MCP-4's budget mitigation)", async () => {
     const result = await call("create_plan", HOUSE);
     expect(resourceOf(result)).toBeUndefined();
@@ -84,8 +93,9 @@ describe("create_plan", () => {
       }),
     );
     // The pin reaches the generator as an exact width, not a minimum the weights can
-    // then argue with.
-    expect(data.summary.generatorTree.children[0]).toMatchObject({ roomId: "k", exactWidth: 4000 });
+    // then argue with. Read off `doc` — the anonymous response drops the duplicate copy
+    // that would otherwise sit in `summary.generatorTree` too (see summaryForResponse).
+    expect(data.doc.levels[0].generator.tree.children[0]).toMatchObject({ roomId: "k", exactWidth: 4000 });
     const kitchen = data.summary.rooms.find((r: { roomId: string }) => r.roomId === "k");
     expect(kitchen.approxAreaMm2 / data.summary.boundary.depthMm).toBeCloseTo(4000, -2);
   });
@@ -175,6 +185,9 @@ describe("apply_patch", () => {
     // The document passed in is untouched: state travels in arguments (MCP-6).
     expect(created.doc.levels[0].graph.rooms.k).toBeDefined();
     expect(Object.keys(created.doc.levels[0].graph.rooms)).toHaveLength(1);
+    // apply_patch's response carries the same doc-vs-summary duplication rule create_plan's does.
+    expect(patched.summary).not.toHaveProperty("generatorTree");
+    expect(patched.doc.levels[0].generator.tree).toBeDefined();
   });
 
   it("reports what changed in words as well as structure (MCP-11)", async () => {
@@ -229,6 +242,57 @@ describe("apply_patch", () => {
     expect(result.isError).toBe(true);
     expect(textOf(result)).toMatch(/`patch` is required/);
   });
+
+  it("nests a room in a corner of another, switching the level to freeform (FR-11)", async () => {
+    const created = dataOf(
+      await call("create_plan", { footprint: { width: 20, depth: 20, unit: "ft" }, rooms: [{ program: "living", id: "living" }] }),
+    );
+    const result = await call("apply_patch", {
+      doc: created.doc,
+      patch: { ops: [{ op: "nestRoom", hostRoomId: "living", roomId: "closet", program: "closet" }] },
+    });
+    expect(result.isError).toBeUndefined();
+    expect(textOf(result)).toMatch(/Added Closet inside Living.*L-shaped.*freeform/);
+
+    const data = dataOf(result);
+    const described = dataOf(await call("describe_plan", { doc: data.doc }));
+    expect(described.mode).toBe("freeform");
+    // A freeform level has no tree to restructure — nestRoom is one of the few ops that
+    // still applies to it.
+    expect(described.allowedOps).not.toContain("addRoom");
+    expect(described.allowedOps).toContain("nestRoom");
+    expect(data.summary.rooms.map((r: { name: string }) => r.name).sort()).toEqual(["Closet", "Living"]);
+  });
+
+  it("sizes a nested room from constraints, in millimetres", async () => {
+    const created = dataOf(
+      await call("create_plan", { footprint: { width: 20, depth: 20, unit: "ft" }, rooms: [{ program: "living", id: "living" }] }),
+    );
+    const result = await call("apply_patch", {
+      doc: created.doc,
+      patch: {
+        ops: [
+          { op: "nestRoom", hostRoomId: "living", roomId: "bath", program: "bath", constraints: { width: { exact: 1600 }, depth: { exact: 2200 } } },
+        ],
+      },
+    });
+    const bath = dataOf(result).summary.rooms.find((r: { roomId: string }) => r.roomId === "bath");
+    expect(bath.approxAreaMm2).toBe(1600 * 2200);
+  });
+
+  it("rejects nesting a room too big for its host with an actionable reason", async () => {
+    // A single room always fills its whole boundary exactly, so pinning the footprint to
+    // the closet's own minimum leaves nothing smaller to carve a second closet from.
+    const created = dataOf(
+      await call("create_plan", { footprint: { width: 610, depth: 610, unit: "mm" }, rooms: [{ program: "closet", id: "closet" }] }),
+    );
+    const result = await call("apply_patch", {
+      doc: created.doc,
+      patch: { ops: [{ op: "nestRoom", hostRoomId: "closet", program: "closet" }] },
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/wouldn't leave any of|too little floor/);
+  });
 });
 
 describe("validate_plan", () => {
@@ -259,7 +323,25 @@ describe("render_svg", () => {
     const resource = resourceOf(result);
     expect(resource?.mimeType).toBe("image/svg+xml");
     expect(resource?.text).toMatch(/^<svg/);
+    expect(resource?.text).toContain('width="640"');
     expect(textOf(result)).toMatch(/SVG attached as floorcraft:\/\//);
+  });
+
+  it("defaults to a width that fits a chat panel rather than a full canvas", async () => {
+    const created = dataOf(await call("create_plan", { rooms: [{ program: "kitchen" }] }));
+    const resource = resourceOf(await call("render_svg", { doc: created.doc }));
+    // Not the app's own canvas default (900/1100) — this host is narrower.
+    expect(resource?.text).toContain('width="480"');
+    expect(resource?.text).toMatch(/height="[\d.]+"/);
+  });
+
+  it("rejects a width outside the sane range rather than emitting something unusable", async () => {
+    const created = dataOf(await call("create_plan", { rooms: [{ program: "kitchen" }] }));
+    const tooSmall = await call("render_svg", { doc: created.doc, options: { targetWidthPx: 10 } });
+    const tooBig = await call("render_svg", { doc: created.doc, options: { targetWidthPx: 100_000 } });
+    expect(tooSmall.isError).toBe(true);
+    expect(tooBig.isError).toBe(true);
+    expect(textOf(tooSmall)).toMatch(/between 120 and 2400/);
   });
 });
 
@@ -365,6 +447,13 @@ describe("saved plans (MCP-7)", () => {
     if (!stored.ok) throw new Error(stored.error);
     expect(stored.doc.title).toBe("Rebuilt");
     expect(Object.values(stored.doc.levels[0]!.graph.rooms).map((r) => r.program)).toEqual(["garage"]);
+  });
+
+  it("keeps the generator tree in the summary for a saved plan, which never gets `doc` back", async () => {
+    const { env } = await envWithPlan();
+    const data = dataOf(await call("create_plan", { planId: "plan-1", rooms: [{ program: "garage" }] }, { env, bearer: EDIT }));
+    expect(data.doc).toBeUndefined();
+    expect(data.summary.generatorTree).toBeDefined();
   });
 
   it("takes the token from the connector URL when a host cannot send a header", async () => {

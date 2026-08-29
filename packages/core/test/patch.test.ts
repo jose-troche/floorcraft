@@ -197,3 +197,137 @@ describe("setDimension units", () => {
     expect(changes).toContain("Kitchen width pinned to 3658mm");
   });
 });
+
+describe("nestRoom", () => {
+  function livingRoomPlan() {
+    // A single generous room, big enough to comfortably swallow a closet's minimum
+    // (610 x 610) with plenty of slack left over on every side.
+    return apply(basePlan(), [{ op: "addRoom", roomId: "living", program: "living", areaWeight: 1 }]).doc;
+  }
+
+  it("carves a corner nook, switching the level to freeform", () => {
+    const { doc, changes } = apply(livingRoomPlan(), [
+      { op: "nestRoom", hostRoomId: "living", roomId: "closet", program: "closet" },
+    ]);
+    const level = activeLevel(doc);
+    expect(level.generator?.kind).toBe("freeform");
+    expect(Object.keys(level.graph.rooms).sort()).toEqual(["closet", "living"]);
+    expect(changes[0]).toMatch(/Added Closet inside Living \(Living is now L-shaped; this level is now edited freeform\)/);
+
+    // The host is now a 2-cell rect union (an L), the nested room a single rectangle.
+    if (level.generator?.kind !== "freeform") throw new Error("expected freeform");
+    const hostCells = level.generator.cells.filter((c) => c.roomId === "living");
+    const nookCells = level.generator.cells.filter((c) => c.roomId === "closet");
+    expect(hostCells).toHaveLength(2);
+    expect(nookCells).toHaveLength(1);
+
+    // Area is conserved: nothing was gained or lost in the carve.
+    const boundary = level.boundary;
+    const totalArea = [...hostCells, ...nookCells].reduce((sum, c) => sum + c.w * c.d, 0);
+    expect(totalArea).toBe(boundary.widthMm * boundary.depthMm);
+  });
+
+  it("sizes the nook to the program minimum when unpinned", () => {
+    const { doc } = apply(livingRoomPlan(), [{ op: "nestRoom", hostRoomId: "living", roomId: "closet", program: "closet" }]);
+    const level = activeLevel(doc);
+    if (level.generator?.kind !== "freeform") throw new Error("expected freeform");
+    const nook = level.generator.cells.find((c) => c.roomId === "closet")!;
+    expect([nook.w, nook.d].sort((a, b) => a - b)).toEqual([610, 610]);
+  });
+
+  it("honours a pinned exact size", () => {
+    const { doc } = apply(livingRoomPlan(), [
+      { op: "nestRoom", hostRoomId: "living", roomId: "bath", program: "bath", constraints: { width: { exact: 1600 }, depth: { exact: 2200 } } },
+    ]);
+    const level = activeLevel(doc);
+    if (level.generator?.kind !== "freeform") throw new Error("expected freeform");
+    const nook = level.generator.cells.find((c) => c.roomId === "bath")!;
+    expect(nook.w).toBe(1600);
+    expect(nook.d).toBe(2200);
+  });
+
+  it("nests directly into an already-freeform level without a separate detachGenerator", () => {
+    const { doc: detached } = apply(livingRoomPlan(), [{ op: "detachGenerator" }]);
+    const { doc } = apply(detached, [{ op: "nestRoom", hostRoomId: "living", roomId: "closet", program: "closet" }]);
+    expect(activeLevel(doc).generator?.kind).toBe("freeform");
+    expect(Object.keys(activeLevel(doc).graph.rooms).sort()).toEqual(["closet", "living"]);
+  });
+
+  it("rejects a size below the program minimum instead of building it undersized", () => {
+    const result = applyPatch(livingRoomPlan(), {
+      ops: [{ op: "nestRoom", hostRoomId: "living", roomId: "closet", program: "closet", constraints: { width: { exact: 200 }, depth: { exact: 610 } } }],
+      source: "provider",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors[0]).toMatch(/needs at least 610mm x 610mm/);
+  });
+
+  it("rejects nesting into a room that does not exist", () => {
+    const result = applyPatch(livingRoomPlan(), { ops: [{ op: "nestRoom", hostRoomId: "nope", program: "closet" }], source: "provider" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors[0]).toMatch(/host room nope not found/);
+  });
+
+  it("rejects a nook that would leave nothing of the host", () => {
+    // A single room always fills its whole boundary exactly (nothing else to divide it
+    // against), so a boundary sized to the closet's own minimum makes the host exactly
+    // as big as the nook — nothing strictly smaller to carve it from.
+    const exact = createEmptyPlan({ id: "p", title: "T", units: "imperial", boundary: { widthMm: 610, depthMm: 610 } });
+    const { doc } = apply(exact, [{ op: "addRoom", roomId: "a", program: "closet", areaWeight: 1 }]);
+    const result = applyPatch(doc, { ops: [{ op: "nestRoom", hostRoomId: "a", program: "closet" }], source: "provider" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors[0]).toMatch(/wouldn't leave any of/);
+  });
+
+  it("rejects nesting into a room that is already an irregular shape", () => {
+    const doc = livingRoomPlan();
+    const { doc: nested } = apply(doc, [{ op: "nestRoom", hostRoomId: "living", roomId: "closet", program: "closet" }]);
+    // "living" is now a 2-cell L; nesting into it again has no single rectangle to carve from.
+    const result = applyPatch(nested, { ops: [{ op: "nestRoom", hostRoomId: "living", program: "bath" }], source: "provider" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors[0]).toMatch(/already has an irregular shape \(2 pieces\)/);
+  });
+
+  it("lets the two remainder pieces be thin, since they stay one continuous floor", () => {
+    // buildWallGraph dissolves the seam between two cells of the same room (see
+    // rectUnion.test.ts), so a thin decomposition piece is not a thin room — the strip
+    // beside the nook opens straight into the rest of "Living". Only the room's total
+    // remaining area is what could actually make it unusable.
+    const { doc } = apply(livingRoomPlan(), [
+      { op: "nestRoom", hostRoomId: "living", roomId: "closet", program: "closet", constraints: { width: { exact: 610 }, depth: { exact: 3000 } } },
+    ]);
+    const level = activeLevel(doc);
+    if (level.generator?.kind !== "freeform") throw new Error("expected freeform");
+    expect(level.generator.cells.filter((c) => c.roomId === "living")).toHaveLength(2);
+  });
+
+  it("rejects a nook that would leave too little floor for the host's own program", () => {
+    // A hallway pinned to exactly its own minimum has no spare area at all, so any bite
+    // taken out of it drops the remainder below what a hallway needs.
+    const exact = createEmptyPlan({ id: "p", title: "T", units: "imperial", boundary: { widthMm: 910, depthMm: 910 } });
+    const { doc } = apply(exact, [{ op: "addRoom", roomId: "hall", program: "hallway", areaWeight: 1 }]);
+    const result = applyPatch(doc, {
+      ops: [{ op: "nestRoom", hostRoomId: "hall", program: "closet", constraints: { width: { exact: 610 }, depth: { exact: 610 } } }],
+      source: "provider",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errors[0]).toMatch(/too little floor for a hallway/);
+  });
+
+  it("all-or-nothing: a rejected nestRoom leaves the plan untouched, same as any other op", () => {
+    const doc = livingRoomPlan();
+    const result = applyPatch(doc, {
+      ops: [
+        { op: "nestRoom", hostRoomId: "living", roomId: "closet", program: "closet" },
+        { op: "nestRoom", hostRoomId: "nope", program: "bath" },
+      ],
+      source: "provider",
+    });
+    expect(result.ok).toBe(false);
+  });
+});

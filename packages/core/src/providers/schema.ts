@@ -5,8 +5,10 @@
 import {
   DEFAULT_AREA_WEIGHT,
   ROOM_PROGRAM_MIN_DIMENSIONS,
+  type DimensionRange,
   type Patch,
   type PatchOp,
+  type RoomConstraints,
   type RoomProgram,
   type SpatialDirection,
 } from "../types.js";
@@ -35,6 +37,7 @@ export const FULL_PATCH_OPS = [
   "addLevel",
   "setActiveLevel",
   "renameLevel",
+  "nestRoom",
 ] as const;
 
 /**
@@ -42,6 +45,8 @@ export const FULL_PATCH_OPS = [
  * Generator in types.ts). Every tree-shaped op (addRoom, resizeRoom, setSplit, dimension
  * pins, ...) assumes a generator tree to edit and would just fail against cells, so a
  * freeform level asks the model for less rather than let it guess at a rejected op.
+ * nestRoom is the exception: it carves a corner out of a single-rectangle room cell and
+ * never touches a generator tree, so it works — and is offered — on a freeform level too.
  */
 export const FREEFORM_PATCH_OPS = [
   "renameRoom",
@@ -52,6 +57,7 @@ export const FREEFORM_PATCH_OPS = [
   "addLevel",
   "setActiveLevel",
   "renameLevel",
+  "nestRoom",
 ] as const;
 
 /**
@@ -93,6 +99,30 @@ function isFiniteNumber(v: unknown): v is number {
 }
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.length > 0;
+}
+
+function readDimensionRange(raw: unknown): DimensionRange | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  const range: DimensionRange = {};
+  if (isFiniteNumber(r.exact)) range.exact = r.exact;
+  if (isFiniteNumber(r.min)) range.min = r.min;
+  if (isFiniteNumber(r.max)) range.max = r.max;
+  return Object.keys(range).length > 0 ? range : undefined;
+}
+
+/**
+ * A lenient width/depth reader for `nestRoom` — the only FULL_PATCH_OPS op that reads
+ * `constraints` from a provider. Anything malformed (wrong type, unknown keys) is dropped
+ * rather than rejected: the op still succeeds with the reducer's own program-minimum
+ * default, the same graceful fallback addRoom's `areaWeight` gets above.
+ */
+function readRoomConstraints(raw: unknown): RoomConstraints | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const c = raw as Record<string, unknown>;
+  const width = readDimensionRange(c.width);
+  const depth = readDimensionRange(c.depth);
+  return width || depth ? { ...(width ? { width } : {}), ...(depth ? { depth } : {}) } : undefined;
 }
 
 function validateOp(raw: unknown, allowed: ReadonlySet<string>): PatchOp | string {
@@ -231,6 +261,22 @@ function validateOp(raw: unknown, allowed: ReadonlySet<string>): PatchOp | strin
       if (!isNonEmptyString(o.levelId)) return "renameLevel: levelId is required";
       if (!isNonEmptyString(o.name)) return "renameLevel: name is required";
       return { op: "renameLevel", levelId: o.levelId, name: o.name };
+    }
+    case "nestRoom": {
+      if (!isNonEmptyString(o.hostRoomId)) return "nestRoom: hostRoomId is required";
+      if (typeof o.program !== "string" || !ROOM_PROGRAMS.includes(o.program as RoomProgram)) {
+        return `nestRoom: unknown program '${String(o.program)}'`;
+      }
+      if (o.name !== undefined && typeof o.name !== "string") return "nestRoom: name must be a string";
+      if (o.roomId !== undefined && typeof o.roomId !== "string") return "nestRoom: roomId must be a string";
+      return {
+        op: "nestRoom",
+        hostRoomId: o.hostRoomId,
+        program: o.program as RoomProgram,
+        name: o.name as string | undefined,
+        roomId: o.roomId as string | undefined,
+        constraints: readRoomConstraints(o.constraints),
+      };
     }
     default:
       return `unhandled op '${op}'`;

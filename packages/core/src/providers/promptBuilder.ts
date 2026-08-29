@@ -24,6 +24,7 @@ const OP_DOCS: Record<OpName, string> = {
   addLevel: `addLevel {name?, copyFromLevelId?} — add a new storey and switch to it; copyFromLevelId starts it from another level's layout.`,
   setActiveLevel: `setActiveLevel {levelId} — switch which storey subsequent ops in this patch and the canvas apply to.`,
   renameLevel: `renameLevel {levelId, name} — rename a storey.`,
+  nestRoom: `nestRoom {hostRoomId, program, roomId?, name?, constraints?} — add a small room carved from one corner of hostRoomId (e.g. a closet inside a bedroom), leaving hostRoomId L-shaped; constraints.width/depth.exact size it in mm, default is the program's minimum. Switches this level to freeform editing.`,
 };
 
 export function buildSystemPrompt(allowedOps: readonly OpName[]): string {

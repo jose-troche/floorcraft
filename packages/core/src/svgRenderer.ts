@@ -108,9 +108,15 @@ export function renderSvg(doc: PlanDocument, options: RenderOptions = {}): strin
   const frame: Frame = { widthMm, depthMm, margin, legendHeight };
 
   const parts: string[] = [];
+  // Both width and height are given explicitly (not just viewBox) so a host that renders
+  // this as a plain <img> — an MCP resource preview, in particular, per MCP-12 — has a
+  // definite intrinsic size to lay out around, rather than falling back to some default
+  // box and letting the drawing overflow it uncropped.
+  const targetWidthPx = options.targetWidthPx ?? 900;
+  const targetHeightPx = round((targetWidthPx * viewH) / viewW);
   parts.push(
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${round(viewW)} ${round(viewH)}" ` +
-      `width="${options.targetWidthPx ?? 900}" preserveAspectRatio="xMidYMid meet" role="img">`,
+      `width="${targetWidthPx}" height="${targetHeightPx}" preserveAspectRatio="xMidYMid meet" role="img">`,
   );
   parts.push(`<title>${escapeXml(doc.title)}</title>`);
   parts.push(

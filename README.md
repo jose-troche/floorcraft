@@ -101,6 +101,40 @@ level gets this reduced set too (`FREEFORM_PATCH_OPS` in
 `providers/schema.ts`), so it isn't asked for restructuring it has no way to
 express.
 
+### Nested rooms (`nestRoom`, FR-11's other consumer)
+
+A closet inside a bedroom, a bath inside a suite: neither a slicing tree nor
+a rect-union room can express one room's floor fully surrounded by another's
+on every side (DM-1's guillotine/rectilinear constraints have no vocabulary
+for it), so `nestRoom {hostRoomId, program, roomId?, name?, constraints?}` is
+the closest real equivalent — it carves a small room from *one corner* of a
+single-rectangle host, leaving the host L-shaped. Given only a program, the
+nook is sized to that program's minimum (`ROOM_PROGRAM_MIN_DIMENSIONS`);
+`constraints.width`/`depth` pins an exact size in mm, same field addRoom
+already accepts. The corner itself is picked by the reducer, not the caller —
+`nesting.ts`'s `planNestedRoom` tries all four and keeps whichever leaves the
+roomiest remainder, the same "the model states what, the solver decides
+where" split every other placement op in the vocabulary already follows.
+
+The host doesn't need to validate each remainder piece individually against
+program minimums: `buildWallGraph` dissolves the seam between two cells of
+the same room (see `rectUnion.test.ts`), so the strip beside the nook is not
+a separate cramped space — it opens straight into the rest of the room. What
+*can* make a carve genuinely bad is too little floor left overall, which is
+what's checked, against the same minimum SLV-2 already holds every generated
+room to.
+
+Like `detachGenerator`, `nestRoom` needs the rect-union representation, so it
+switches a slicing level to freeform as a side effect — solving the current
+tree once and freezing the result, exactly `detachGenerator`'s own
+conversion, done inline so a caller doesn't have to issue that op first. On
+an already-freeform level it just needs the host to still be a single
+rectangle; nesting into a room that's already irregular is refused with an
+actionable message rather than guessed at. This is the one op in
+`FREEFORM_PATCH_OPS` that isn't also tree-shaped — see `patch.ts`,
+`nesting.ts`, and the `nestRoom` describe blocks in `types.ts` and
+`providers/schema.ts`.
+
 ### Multi-storey (§3.2)
 
 `addLevel`, `removeLevel`, `setActiveLevel`, `renameLevel`, and
@@ -341,9 +375,9 @@ adds transport, auth, caps and wording, and nothing else.
 |---|---|
 | `create_plan` | Structured room programme → a solved plan. Fits a footprint to the rooms if you don't state one. |
 | `describe_plan` | The INF-2 digest: rooms with ids/programs/areas, adjacencies, levels, exterior wall ids, openings. |
-| `apply_patch` | Applies edit ops and re-solves. All-or-nothing. |
+| `apply_patch` | Applies edit ops and re-solves. All-or-nothing. Includes `nestRoom` — a closet or bath carved from a corner of another room. |
 | `validate_plan` | `{valid, violations[]}` — rooms under their program minimum, rooms no exterior door reaches, a level with no way in or out. |
-| `render_svg` | The drawing, as an MCP resource a host can display inline (MCP-12). |
+| `render_svg` | The drawing, as an MCP resource a host can display inline (MCP-12). Defaults to a 480px-wide render sized for a chat panel, not the app's own 900–1100px canvas default — pass `options.targetWidthPx` for a host with more room. |
 | `export_plan` | `json`, `svg`, `dxf` or `ifc`, inline. |
 | `list_programs` | Room programs with the clearances the solver enforces. |
 
@@ -352,6 +386,32 @@ Every response carries a human-readable summary *and* the structured payload
 description writes out the entire patch vocabulary inline (MCP-10) — the agent
 has no other schema source, and `test/mcp/protocol.test.ts` fails if an op is
 ever added to the vocabulary without being documented there.
+
+### Keeping token cost down
+
+A tool result stays in the conversation and gets resent as input on every
+later turn (the Messages API is stateless), so bytes in one response are paid
+for repeatedly, not once. Two things follow from that, one already handled
+here and one that's the caller's own choice:
+
+- `create_plan` and `apply_patch` used to return both `summary.generatorTree`
+  and, in anonymous mode, the identical tree again inside `doc.levels[].generator.tree`
+  — the same bytes charged twice on every turn from then on. `summaryForResponse`
+  in `tools.ts` drops the redundant copy whenever `doc` is also present; the
+  saved-plan response (`planId`/`webUrl`, never `doc`) keeps it, since there's
+  nothing else to read it from.
+- **Anonymous mode's `doc` is the bigger, structural cost**: every call resends
+  and returns the whole plan, so its size grows with edit count for the rest of
+  the session. A **saved plan** avoids this entirely — only `planId` (a short
+  string) and the patch itself travel each way; the full document stays in D1.
+  For a plan you'll edit more than a couple of times, save it early (create it
+  into a plan you've already opened in the web app, or ask the agent to) rather
+  than working anonymously through many turns.
+
+The drawing being a separate call (see "The CPU budget" below — that split
+was originally about the Worker's own CPU ceiling) pays off here too: a
+drawing you don't ask for is bytes you don't pay to have resent on every
+later turn either.
 
 ### Two ways to hold plan state (MCP-6, MCP-7)
 
@@ -467,6 +527,33 @@ names moving `render_svg` off the shared path as the mitigation, so that is what
 happens: one tool draws, and it is one call away. It costs the agent's context
 less too, and open question 7 is unresolved — hosts differ on whether they
 render an inline resource at all.
+
+### Which model to point at this
+
+MCP-1 means the model's job here is thin: turn a sentence into a structured
+`create_plan`/`apply_patch` call, then narrate the deterministic result back —
+not the open-ended reasoning Opus-tier models earn their price on. Sonnet is
+the reasonable default for that shape of work, and it's meaningfully cheaper
+per token doing it (Claude API list pricing: Sonnet 5 $2/$10 per MTok
+input/output vs. Opus 5's $5/$25 — roughly 2.5x on both sides). Reach for a
+bigger model only when the *request itself* is the hard part — an ambiguous or
+compound brief ("something that feels like a 1920s bungalow, three
+bedrooms, one should work as an office") that needs more careful structured
+extraction before any tool gets called; the geometry after that point costs
+the same regardless of which model asked for it.
+
+Every visible round trip is a full model turn (send, reason, call, wait,
+reason again), and a typical session runs several in sequence — create →
+describe (for room ids and exterior wall ids) → one or more edits → validate
+→ render/export. The Worker itself is not where that time goes: MCP-3's own
+benchmark (above) puts every tool at low single-digit milliseconds, and a
+saved-plan write through a real deployment measured ~300ms round trip
+end-to-end including HTTP overhead. What dominates is the number of turns
+and how much each one reasons — both larger on a bigger model or at a higher
+effort setting. Fewer, more consolidated instructions (stating the whole
+edit up front rather than one change per message) and skipping `render_svg`
+until you actually want to look at something both cut real turns, not just
+apparent ones.
 
 ### Abuse controls
 

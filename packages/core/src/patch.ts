@@ -33,6 +33,7 @@ import { solveSlicingTree, type LeafRect, type UnmetConstraint } from "./slicing
 import { buildWallGraph, type RoomMeta } from "./wallGraph.js";
 import { anchorForEdge, applyOpeningsToGraph } from "./openings.js";
 import { findLeafPath, getNodeAt, insertLeaf, removeLeaf, setSplitAt, swapLeaves, totalAreaWeight, updateLeaf } from "./treeOps.js";
+import { planNestedRoom } from "./nesting.js";
 
 export type ApplyPatchResult =
   /**
@@ -375,6 +376,99 @@ function applyTreeOps(
         state.units = op.units;
         break;
       }
+      case "nestRoom": {
+        if (!state.roomMeta[op.hostRoomId]) {
+          errors.push(`nestRoom: host room ${op.hostRoomId} not found`);
+          break;
+        }
+        const { minWidth, minDepth } = minSizeFor(op.program, op.constraints);
+        const nookWidth = op.constraints?.width?.exact ?? minWidth;
+        const nookDepth = op.constraints?.depth?.exact ?? minDepth;
+        // Orientation-independent, same comparison validatePlan uses: a room can be
+        // pinned either way round, so only the pair of sides has to clear the pair of minimums.
+        const shortSide = Math.min(nookWidth, nookDepth);
+        const longSide = Math.max(nookWidth, nookDepth);
+        const minShort = Math.min(minWidth, minDepth);
+        const minLong = Math.max(minWidth, minDepth);
+        if (shortSide < minShort || longSide < minLong) {
+          const kind = op.program.replace(/-/g, " ");
+          errors.push(`nestRoom: a ${kind} needs at least ${minWidth}mm x ${minDepth}mm for clearances, so ask for a size at or above that.`);
+          break;
+        }
+
+        // A guillotine tree has no vocabulary for "one corner of this room" (only full
+        // cuts), so nesting always needs the rect-union representation — freeform, not
+        // slicing. Converting here is exactly detachGenerator's own conversion (solve the
+        // tree once, freeze the result into cells), done inline so a caller doesn't have
+        // to issue detachGenerator itself before nesting into a level that still has one.
+        if (state.mode === "slicing") {
+          if (!state.tree) {
+            errors.push("nestRoom: no generated layout to nest into.");
+            break;
+          }
+          const solved = solveSlicingTree(state.tree, state.boundary, state.gridModule);
+          if (!solved.ok) {
+            errors.push(`nestRoom: ${solved.violations.map((v) => v.message).join(" ")}`);
+            break;
+          }
+          state.cells = solved.leaves.map((l): RoomCell => ({ x: l.x, y: l.y, w: l.w, d: l.d, roomId: l.roomId }));
+          state.savedTree = state.tree;
+          state.tree = undefined;
+          state.mode = "freeform";
+        }
+
+        const hostCells = state.cells.filter((c) => c.roomId === op.hostRoomId);
+        const hostName = state.roomMeta[op.hostRoomId]!.name;
+        if (hostCells.length !== 1) {
+          errors.push(
+            `nestRoom: "${hostName}" already has an irregular shape (${hostCells.length} pieces) — nested placement needs a ` +
+              `single-rectangle host. Reshape it on the canvas first.`,
+          );
+          break;
+        }
+
+        const host = hostCells[0]!;
+        const plan = planNestedRoom(host, nookWidth, nookDepth);
+        if (!plan) {
+          errors.push(
+            `nestRoom: a ${nookWidth}mm x ${nookDepth}mm room wouldn't leave any of "${hostName}" left — ask for a smaller one ` +
+              `or enlarge "${hostName}" first.`,
+          );
+          break;
+        }
+        // The two remainder pieces stay one continuous floor — buildWallGraph dissolves
+        // the seam between same-room cells (rectUnion.test.ts) — so a thin *piece* of the
+        // decomposition is not a thin *room*: the corner strip beside the nook flows
+        // straight into the rest of the host. What can genuinely leave the host unusable
+        // is too little floor *overall*, so that is what gets checked, against the same
+        // minimum SLV-2 already holds every generated room to.
+        const hostProgram = state.roomMeta[op.hostRoomId]!.program;
+        const hostMin = ROOM_PROGRAM_MIN_DIMENSIONS[hostProgram];
+        const remainingArea = host.w * host.d - plan.nook.w * plan.nook.d;
+        if (remainingArea < hostMin.minWidth * hostMin.minDepth) {
+          const kind = hostProgram.replace(/-/g, " ");
+          errors.push(
+            `nestRoom: carving that out of "${hostName}" would leave too little floor for a ${kind} — make "${hostName}" ` +
+              `bigger or ask for a smaller room.`,
+          );
+          break;
+        }
+
+        const roomId = allocateRoomId(state, op.roomId);
+        addedRoomIds.push(roomId);
+        state.cells = [
+          ...state.cells.filter((c) => c.roomId !== op.hostRoomId),
+          { ...plan.remainder[0], roomId: op.hostRoomId },
+          { ...plan.remainder[1], roomId: op.hostRoomId },
+          { ...plan.nook, roomId },
+        ];
+        state.roomMeta[roomId] = {
+          name: op.name ?? defaultNameFor(op.program, Object.values(state.roomMeta).filter((m) => m.program === op.program).length),
+          program: op.program,
+          constraints: op.constraints,
+        };
+        break;
+      }
       case "detachGenerator": {
         if (state.mode === "freeform") {
           errors.push("detachGenerator: level is already freeform.");
@@ -579,6 +673,16 @@ function summarizeChanges(
       case "addRoom": {
         const addedId = addedRoomIds[addedIndex++];
         changes.push(addedId ? `Added ${nameOf(addedId)}` : "Added a room");
+        break;
+      }
+      case "nestRoom": {
+        const addedId = addedRoomIds[addedIndex++];
+        const hostName = nameOf(op.hostRoomId);
+        changes.push(
+          addedId
+            ? `Added ${nameOf(addedId)} inside ${hostName} (${hostName} is now L-shaped; this level is now edited freeform)`
+            : `Added a room inside ${hostName}`,
+        );
         break;
       }
       case "removeRoom":

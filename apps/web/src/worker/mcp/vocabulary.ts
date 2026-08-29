@@ -65,6 +65,14 @@ const PATCH_OP_DOCS: Record<OpName, string> = {
     '{"op":"setActiveLevel","levelId":string} — ' +
     "switches which level the other ops (and describe_plan, render_svg, validate_plan) work on.",
   renameLevel: '{"op":"renameLevel","levelId":string,"name":string} — renames a storey.',
+  nestRoom:
+    '{"op":"nestRoom","hostRoomId":string,"program":<program>,"roomId"?:string,"name"?:string,"constraints"?:{"width"?:{"exact":mm},"depth"?:{"exact":mm}}} — ' +
+    "adds a small room carved from one corner of hostRoomId — a closet inside a bedroom, a bath inside a suite — " +
+    "leaving hostRoomId L-shaped. Neither a slicing tree nor a plain room can express one room fully enclosed by " +
+    "another, so this is the closest real equivalent: hostRoomId gives up a corner and keeps everything else, and " +
+    "the corner picked is whichever leaves the roomiest remainder. Without constraints, the new room is sized to " +
+    "its program's minimum. Switches this level to freeform editing (describe_plan's mode) if it wasn't already — " +
+    "after this, addRoom/resizeRoom/setSplit and other tree-shaped ops no longer apply here.",
 };
 
 function enumLine(name: string, values: readonly string[]): string {

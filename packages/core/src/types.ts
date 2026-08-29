@@ -293,6 +293,14 @@ export type PatchOp =
   | { op: "moveOpening"; openingId: OpeningId; offsetRatio: number }
   | { op: "setOpeningSwing"; openingId: OpeningId; swing: DoorSwing }
   | { op: "setLabelAnchor"; roomId: RoomId; x: number; y: number }
+  // Nested rooms (FR-11's other consumer). Carves `program` from one corner of
+  // `hostRoomId` — the only shape a rect-union room or a guillotine tree can express for
+  // "a closet inside the bedroom" (see nesting.ts) — and switches the level to freeform,
+  // since the host is no longer a single rectangle a generator tree can produce. Distinct
+  // from addRoom's `direction: "inside"`, which partitions the host by a full-width or
+  // full-depth cut and keeps it rectangular (see SpatialDirection) — nestRoom is the one
+  // that actually produces the L-shape and an enclosed-looking nook.
+  | { op: "nestRoom"; hostRoomId: RoomId; roomId?: RoomId; program: RoomProgram; name?: string; constraints?: RoomConstraints }
   // Detached/freeform editing (DM-2, FR-11). setRoomRects is the one primitive every
   // freeform gesture (wall drag, L-shape split) reduces to; see dragPlan.ts.
   | { op: "detachGenerator" }

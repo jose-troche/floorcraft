@@ -16,6 +16,17 @@ function samplePlan() {
 }
 
 describe("renderSvg", () => {
+  it("gives the root element an explicit height matching the viewBox aspect ratio, not just width", () => {
+    const svg = renderSvg(samplePlan(), { targetWidthPx: 600 });
+    const [vbW, vbH] = svg.match(/viewBox="0 0 ([\d.]+) ([\d.]+)"/)!.slice(1, 3).map(Number);
+    const width = Number(svg.match(/width="([\d.]+)"/)![1]);
+    const height = Number(svg.match(/height="([\d.]+)"/)![1]);
+    // A host previewing this as a plain <img> needs both dimensions up front to lay out
+    // around, not just a width with an ambiguous height.
+    expect(width).toBe(600);
+    expect(height).toBeCloseTo((600 * vbH!) / vbW!, 0);
+  });
+
   it("produces well-formed SVG with title, room labels, and no unresolved coordinates", () => {
     const svg = renderSvg(samplePlan());
     expect(svg.startsWith("<svg")).toBe(true);

@@ -151,6 +151,21 @@ function roomLines(doc: PlanDocument): string[] {
   );
 }
 
+/**
+ * The plan summary for a response that may also carry the full `doc` (anonymous mode).
+ * `generatorTree` is the raw slicing tree, already present verbatim in
+ * `doc.levels[].generator.tree` whenever `doc` rides along too — an agent paying by the
+ * token would be charged twice for the same bytes on every turn from here on, since a
+ * tool result stays in the conversation and gets resent on every later turn. The saved-
+ * plan response (`planId`/`webUrl`, never `doc`) has no second copy to drop it from.
+ */
+function summaryForResponse(doc: PlanDocument, handle: Pick<PlanHandle, "stored">) {
+  const summary = buildPlanSummary(doc);
+  if (handle.stored) return summary;
+  const { generatorTree: _generatorTree, ...trimmed } = summary;
+  return trimmed;
+}
+
 /** How a caller keeps working on this plan after the call returns (MCP-6's two modes). */
 function continuation(handle: Pick<PlanHandle, "stored">, doc: PlanDocument, ctx: ToolContext): { text: string; data: Record<string, unknown> } {
   if (handle.stored) {
@@ -329,7 +344,7 @@ async function createPlan(args: Record<string, unknown>, ctx: ToolContext): Prom
     "Call render_svg to draw it.",
   ].join("\n");
 
-  return reply(text, { summary: buildPlanSummary(doc), validation, ...next.data });
+  return reply(text, { summary: summaryForResponse(doc, handle), validation, ...next.data });
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +476,7 @@ async function applyPatchTool(args: Record<string, unknown>, ctx: ToolContext): 
     next.text,
   ].join("\n");
 
-  return reply(text, { changes: result.changes, warnings, summary: buildPlanSummary(result.doc), validation, ...next.data });
+  return reply(text, { changes: result.changes, warnings, summary: summaryForResponse(result.doc, handle), validation, ...next.data });
 }
 
 // ---------------------------------------------------------------------------
@@ -475,15 +490,29 @@ async function validatePlanTool(args: Record<string, unknown>, ctx: ToolContext)
   return reply(text, validation);
 }
 
+/**
+ * The default width when a caller doesn't state one — chosen for a chat-width host
+ * rather than the 900px svgRenderer itself defaults to (tuned for a full editing canvas,
+ * per canvas.ts's own 1100px). MCP-12's open question (§11 item 7) is exactly this: host
+ * rendering behaviour varies and moves, so a caller that knows its own host has more room
+ * can always ask for a bigger one via `options.targetWidthPx`.
+ */
+const DEFAULT_SVG_WIDTH_PX = 480;
+const MIN_SVG_WIDTH_PX = 120;
+const MAX_SVG_WIDTH_PX = 2400;
+
 async function renderSvgTool(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const handle = await openPlanArg(ctx.env, args, ctx.bearer);
   const doc = handle.doc;
   const options = (args.options ?? {}) as Record<string, unknown>;
-  const render = {
-    showDimensions: options.showDimensions !== false,
-    showLegend: options.showLegend !== false,
-    ...(options.targetWidthPx !== undefined ? { targetWidthPx: num(options.targetWidthPx, "options.targetWidthPx") } : {}),
-  };
+  let targetWidthPx = DEFAULT_SVG_WIDTH_PX;
+  if (options.targetWidthPx !== undefined) {
+    targetWidthPx = num(options.targetWidthPx, "options.targetWidthPx");
+    if (targetWidthPx < MIN_SVG_WIDTH_PX || targetWidthPx > MAX_SVG_WIDTH_PX) {
+      throw new ToolError(`options.targetWidthPx must be between ${MIN_SVG_WIDTH_PX} and ${MAX_SVG_WIDTH_PX}.`);
+    }
+  }
+  const render = { showDimensions: options.showDimensions !== false, showLegend: options.showLegend !== false, targetWidthPx };
   const block = svgBlock(doc, render);
   const svg = block.type === "resource" ? block.resource.text : "";
   return {
@@ -654,6 +683,9 @@ export const TOOLS: ToolDefinition[] = [
     title: "Draw a plan",
     description:
       "Renders the active level to SVG and attaches it as a resource, for hosts that display images inline. " +
+      `Defaults to ${DEFAULT_SVG_WIDTH_PX}px wide, sized for a chat panel rather than a full canvas — widen it with ` +
+      "options.targetWidthPx for a host with more room, or if the drawing still looks cut off rather than scaled " +
+      "down, ask for a narrower one instead of assuming the host will shrink it to fit. " +
       PLAN_SOURCE_NOTE,
     inputSchema: {
       type: "object",
@@ -664,7 +696,12 @@ export const TOOLS: ToolDefinition[] = [
           properties: {
             showDimensions: { type: "boolean", description: "Dimension strings around the plan. Default true." },
             showLegend: { type: "boolean", description: "Room colour legend. Default true." },
-            targetWidthPx: { type: "number", description: "Rendered width in CSS pixels; height follows the footprint." },
+            targetWidthPx: {
+              type: "number",
+              minimum: MIN_SVG_WIDTH_PX,
+              maximum: MAX_SVG_WIDTH_PX,
+              description: `Rendered width in CSS pixels (height follows the footprint's aspect ratio). Default ${DEFAULT_SVG_WIDTH_PX}.`,
+            },
           },
         },
       },
